@@ -31,7 +31,7 @@ app.get('/',(req,res)=>{res.send("Hello from Kodebox!")});
 
 
 // Error Handlers Middlewares
-import { errorHandler } from './middlewares/errorHandler.middleware';
+import { errorHandler } from './middlewares/errorHandler.middleware.js';
 
 
 app.use(errorHandler);

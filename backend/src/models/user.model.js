@@ -1,0 +1,110 @@
+import { DataTypes } from "sequelize";
+import { sequelize } from "../configs/db/index.js";
+
+const User = sequelize.define(
+  "User",
+  {
+    id: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      autoIncrement: true,
+      primaryKey: true,
+    },
+
+    full_name: {
+      type: DataTypes.STRING(255),
+      allowNull: false,
+      validate: { len: [2, 255] },
+    },
+
+    username: {
+      type: DataTypes.STRING(255),
+      allowNull: false,
+      unique: true,
+      validate: {
+        len: [3, 255],
+        is: /^[a-zA-Z0-9_.]+$/i,
+      },
+    },
+
+    email: {
+      type: DataTypes.STRING(255),
+      allowNull: false,
+      unique: true,
+      validate: { isEmail: true },
+    },
+
+    password_hash: {
+      type: DataTypes.STRING(255),
+      allowNull: false,
+    },
+
+    avatar_url: {
+      type: DataTypes.STRING(255),
+      allowNull: true,
+    },
+
+    role: {
+      type: DataTypes.ENUM("admin", "user"),
+      defaultValue: "user",
+    },
+
+    phone_number: {
+      type: DataTypes.STRING(20),
+      allowNull: false,
+    },
+
+    is_email_verified: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false,
+    },
+
+    razorpay_customer_id: {
+      type: DataTypes.STRING(100),
+      allowNull: true,
+    },
+
+    refresh_token: {
+      type: DataTypes.STRING(512),
+      allowNull: true,
+    },
+
+    otp: {
+      type: DataTypes.INTEGER,
+      allowNull: true,
+    },
+
+    otp_expiry: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+  },
+  {
+    tableName: "users",
+
+    timestamps: true,
+    createdAt: "created_at",
+    updatedAt: "updated_at",
+
+    indexes: [
+      { fields: ["email"] },
+      { fields: ["username"] },
+      { fields: ["phone_number"] },
+    ],
+
+    defaultScope: {
+      attributes: {
+        exclude: ["password_hash", "refresh_token", "otp"],
+      },
+    },
+
+    scopes: {
+      withSecrets: {
+        attributes: {
+          include: ["password_hash", "refresh_token", "otp"],
+        },
+      },
+    },
+  }
+);
+
+export { User };
