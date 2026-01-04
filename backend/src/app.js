@@ -9,6 +9,8 @@ const app=express();
 const __filename=fileURLToPath(import.meta.url);
 const __dirname=path.dirname(__filename);
 
+
+
 // Middlewares
 
 app.use(cors({
@@ -22,12 +24,19 @@ app.use(express.static('public'));
 app.use('/uploads',express.static(path.join(__dirname,'../public/uploads')));
 
 
+
+
 // Routes
-
-
+import { userRouter } from './routes/user.route.js';
+import {authRouter} from './routes/auth.route.js';
 
 
 app.get('/',(req,res)=>{res.send("Hello from Kodebox!")});
+app.use('/api/v1/user',userRouter);
+app.use('/api/v1/auth',authRouter);
+
+
+
 
 
 // Error Handlers Middlewares

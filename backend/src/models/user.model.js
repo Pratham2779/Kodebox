@@ -38,7 +38,7 @@ const User = sequelize.define(
       allowNull: false,
     },
 
-    avatar_url: {
+    avatar_key: {
       type: DataTypes.STRING(255),
       allowNull: true,
     },
@@ -67,20 +67,9 @@ const User = sequelize.define(
       type: DataTypes.STRING(512),
       allowNull: true,
     },
-
-    otp: {
-      type: DataTypes.INTEGER,
-      allowNull: true,
-    },
-
-    otp_expiry: {
-      type: DataTypes.DATE,
-      allowNull: true,
-    },
   },
   {
     tableName: "users",
-
     timestamps: true,
     createdAt: "created_at",
     updatedAt: "updated_at",
@@ -93,14 +82,14 @@ const User = sequelize.define(
 
     defaultScope: {
       attributes: {
-        exclude: ["password_hash", "refresh_token", "otp"],
+        exclude: ["password_hash", "refresh_token"],
       },
     },
 
     scopes: {
       withSecrets: {
         attributes: {
-          include: ["password_hash", "refresh_token", "otp"],
+          include: ["password_hash", "refresh_token"],
         },
       },
     },

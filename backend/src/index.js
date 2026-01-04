@@ -14,7 +14,7 @@ const PORT = process.env.PORT;
 
     
     if (process.env.NODE_ENV === "development") {
-      await sequelize.sync({alter:true});
+      await sequelize.sync({force:true});
       console.log("Models synced (development only)");
     }
 
