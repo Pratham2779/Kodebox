@@ -11,7 +11,7 @@ if (!fs.existsSync(uploadDir)) {
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
   filename: (req, file, cb) => {
-    // sanitize original name and keep extension
+
     const original = path.basename(file.originalname || "file");
     const ext = path.extname(original).toLowerCase();
     const name = `${Date.now()}-${randomUUID()}${ext}`;
@@ -23,7 +23,7 @@ const uploadAvatarImage = multer({
   storage,
   limits: { fileSize: 16 * 1024 * 1024 }, // 16MB
   fileFilter: (req, file, cb) => {
-    // Use the canonical mimetypes
+
     const allowed = [
       "image/jpeg",
       "image/png",

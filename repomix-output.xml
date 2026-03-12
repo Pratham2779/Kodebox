@@ -1,0 +1,3878 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+backend/
+  jobs/
+    backup.cron.js
+  sockets/
+    terminal.socket.js
+  src/
+    configs/
+      db/
+        index.js
+      docker/
+        index.js
+      email/
+        templates/
+          otp.template.js
+        index.js
+      razorpay/
+        index.js
+      S3/
+        index.js
+    controllers/
+      auth.controller.js
+      backup.controller.js
+      instance.controller.js
+      plan.controller.js
+      subscription.controller.js
+      user.controller.js
+      webhook.controller.js
+    middlewares/
+      auth.middleware.js
+      errorHandler.middleware.js
+      multer.middleware.js
+    models/
+      backup.model.js
+      email-verification.model.js
+      index.js
+      instance.model.js
+      payment.model.js
+      plan.model.js
+      subscription.model.js
+      user.model.js
+      volume.model.js
+    routes/
+      auth.route.js
+      backup.route.js
+      instance.route.js
+      plan.route.js
+      subscription.route.js
+      user.route.js
+      webhook.route.js
+    utils/
+      ApiError.js
+      ApiResponse.js
+      asyncHandler.js
+      auth.util.js
+      backup.util.js
+      instance.util.js
+      seedPlan.js
+      user.util.js
+    app.js
+    index.js
+  Dockerfile
+  package.json
+.gitignore
+README.md
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="backend/jobs/backup.cron.js">
+import cron from "node-cron";
+import { Op } from "sequelize";
+import { Instance } from "../src/models/instance.model.js";
+import { User } from "../src/models/user.model.js";
+import { createBackup } from "../src/utils/backup.util.js";
+
+export const processMonthlyBackups = async () => {
+  console.log("[CRON] Checking for due backups...");
+  
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+  try {
+    const instancesToBackup = await Instance.findAll({
+      where: {
+        backup_frequency: "monthly",
+        status: ["running", "stopped"], 
+        [Op.or]: [
+          { last_backup_at: { [Op.lte]: thirtyDaysAgo } },
+          { last_backup_at: null }
+        ]
+      }
+    });
+
+    console.log(`[CRON] Found ${instancesToBackup.length} instances to backup.`);
+
+    for (const instance of instancesToBackup) {
+      try {
+        const user = await User.findByPk(instance.user_id);
+        
+        if (!user) {
+          console.warn(`[CRON] User not found for instance ${instance.name}. Skipping.`);
+          continue;
+        }
+
+        console.log(`[CRON] Backing up instance: ${instance.name}`);
+        
+        await createBackup({
+          username: user.username,
+          instanceId: instance.id
+        });
+      } catch (err) {
+        console.error(`[CRON] Failed for ${instance.name}:`, err.message);
+      }
+    }
+  } catch (error) {
+    console.error("[CRON] Database query failed:", error);
+  }
+};
+
+export const startBackupCron = () => {
+  cron.schedule("0 2 * * *", processMonthlyBackups);
+  console.log("[CRON] Backup scheduler initialized.");
+};
+</file>
+
+<file path="backend/sockets/terminal.socket.js">
+// src/sockets/terminal.socket.js
+import { Server } from "socket.io";
+import jwt from "jsonwebtoken";
+import Docker from "dockerode";
+import pty from "node-pty"; 
+import { config } from "dotenv";
+
+import { User } from "../src/models/user.model.js";
+import { Plan } from "../src/models/plan.model.js";
+import { Instance } from "../src/models/instance.model.js";
+import { Volume } from "../src/models/volume.model.js";
+import { createAndRunInstance, removeInstance } from "../src/utils/instance.util.js";
+
+config();
+
+const JWT_SECRET = process.env.JWT_ACCESS_TOKEN_SECRET;
+const TERMINAL_CORS_ORIGIN = process.env.TERMINAL_CORS_ORIGIN || "http://localhost:5173";
+const DOCKER_SOCKET_PATH = process.env.DOCKER_SOCKET_PATH || "/var/run/docker.sock";
+const FORCE_SHELL_POKE = process.env.FORCE_SHELL_POKE === "true";
+
+const IMAGE_NAME = process.env.INSTANCE_IMAGE || "lscr.io/linuxserver/code-server:latest";
+const NETWORK_NAME = process.env.DOCKER_NETWORK || "kodebox-net";
+
+if (!JWT_SECRET) throw new Error("JWT_ACCESS_TOKEN_SECRET is required");
+
+const docker = new Docker({ socketPath: DOCKER_SOCKET_PATH });
+
+export function initTerminalSocket(httpServer) {
+  const io = new Server(httpServer, {
+    path: "/socket.io",
+    cors: {
+      origin: TERMINAL_CORS_ORIGIN,
+      credentials: true,
+    },
+    transports: ["websocket"],
+  });
+
+  const nsp = io.of("/terminal");
+
+  nsp.use((socket, next) => {
+    try {
+      const token = socket.handshake.auth?.token;
+      if (!token) throw new Error("No token provided");
+      const payload = jwt.verify(token, JWT_SECRET);
+      socket.data.userId = payload.id;
+      return next();
+    } catch (err) {
+      console.warn("Terminal auth failed:", err.message);
+      return next(new Error("Unauthorized or connection expired (refresh page)"));
+    }
+  });
+
+  nsp.on("connection", async (socket) => {
+    let ptyProcess = null;
+    let closed = false;
+
+    const cleanup = (reason) => {
+      if (closed) return;
+      closed = true;
+      try {
+        if (ptyProcess) {
+          ptyProcess.removeAllListeners();
+          try { ptyProcess.kill(); } catch {}
+          ptyProcess = null;
+        }
+      } catch (err) {  }
+    };
+
+    try {
+      const user = await User.findByPk(socket.data.userId);
+      if (!user) {
+        socket.emit("terminal:error", "User not found");
+        return cleanup("user-not-found");
+      }
+      const plan = await Plan.findByPk(user.plan_id);
+      if (!plan) {
+        socket.emit("terminal:error", "Invalid user plan");
+        return cleanup("invalid-plan");
+      }
+
+      const instanceName = `${user.username}-kodebox`;
+      const subdomain = `${user.username}-kodebox.prathamesh.site`;
+      const password = `${user.username}@${user.id}`;
+      const volumeName = `${user.username}-workspace`;
+
+      let instance = await Instance.findOne({ where: { user_id: user.id } });
+      let containerExists = false;
+      let container = null;
+
+      if (instance && instance.status !== "deleted") {
+        try {
+          container = docker.getContainer(instance.name);
+          await container.inspect();
+          containerExists = true;
+        } catch (err) {
+          containerExists = false;
+        }
+      }
+
+      if (!instance || !containerExists || instance.status === "deleted") {
+        socket.emit("terminal:output", `\r\n\x1b[1;36mInitializing new workspace for ${user.username} (Plan: ${plan.name})...\x1b[0m\r\n`);
+
+        try {
+          await removeInstance(instanceName).catch(() => {});
+
+          await createAndRunInstance({
+            instanceName,
+            volumeName,
+            subdomain,
+            password,
+            cpu: plan.cpu_limit,
+            memory: plan.memory_limit_mb,
+            network: NETWORK_NAME,
+            image: IMAGE_NAME
+          });
+
+          if (instance) {
+            instance.name = instanceName;
+            instance.image_name = IMAGE_NAME;
+            instance.instance_password = password;
+            instance.network_name = NETWORK_NAME;
+            instance.status = "running";
+            await instance.save();
+          } else {
+            instance = await Instance.create({
+              user_id: user.id,
+              name: instanceName,
+              image_name: IMAGE_NAME,
+              instance_password: password,
+              status: "running",
+              network_name: NETWORK_NAME
+            });
+          }
+
+          const existingVolume = await Volume.findOne({ where: { instance_id: instance.id } });
+          if (!existingVolume) {
+            await Volume.create({
+              volume_name: volumeName,
+              instance_id: instance.id,
+              mount_path: "/workspace",
+              size_limit_mb: plan.disk_limit_mb
+            });
+          }
+
+          container = docker.getContainer(instance.name);
+          socket.emit("terminal:output", "\r\n\x1b[1;32mWorkspace initialized successfully!\x1b[0m\r\n");
+
+        } catch (creationError) {
+          console.error("Auto-create failed:", creationError);
+          socket.emit("terminal:output", "\r\n\x1b[1;31mFailed to create workspace. Please contact support.\x1b[0m\r\n");
+          return cleanup("creation-failed");
+        }
+      } else {
+        const inspect = await container.inspect();
+        if (!inspect.State.Running) {
+          socket.emit("terminal:output", "\r\n\x1b[1;36mStarting your workspace...\x1b[0m\r\n");
+          await container.start();
+          instance.status = "running";
+          await instance.save().catch(()=>{});
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+      }
+
+      const shellCmd = "docker";
+      const execArgs = ["exec", "-it", instance.name, "/bin/bash"];
+     
+      ptyProcess = pty.spawn(shellCmd, execArgs, {
+        name: "xterm-256color",
+        cols: 80,
+        rows: 24,
+        cwd: process.env.HOME || "/",
+        env: process.env,
+      });
+
+      ptyProcess.onData((data) => {
+        if (closed) return;
+        socket.emit("terminal:output", data);
+      });
+
+      ptyProcess.onExit(({ exitCode, signal }) => {
+        if (!closed) {
+          socket.emit("terminal:output", `\r\n\x1b[1;33mProcess exited (code=${exitCode})\x1b[0m\r\n`);
+        }
+        cleanup("pty-exit");
+      });
+
+      socket.on("terminal:input", (data) => {
+        if (closed || !ptyProcess) return;
+        try {
+          if (data instanceof ArrayBuffer) {
+            const s = new TextDecoder().decode(new Uint8Array(data));
+            ptyProcess.write(s);
+          } else if (typeof data === "string") {
+            ptyProcess.write(data);
+          } else if (data && typeof data === "object" && data.type === "Buffer" && Array.isArray(data.data)) {
+            ptyProcess.write(Buffer.from(data.data).toString("utf8"));
+          } else {
+            ptyProcess.write(String(data));
+          }
+        } catch (err) {
+          console.error("Error writing to pty:", err);
+        }
+      });
+
+      socket.on("terminal:resize", ({ cols, rows }) => {
+        try {
+          if (ptyProcess && typeof cols === "number" && typeof rows === "number") {
+            ptyProcess.resize(cols, rows);
+          }
+        } catch (err) {
+          console.error("Resize error:", err);
+        }
+      });
+
+      socket.on("disconnect", (reason) => {
+        console.log("Socket disconnected:", reason);
+        cleanup("socket-disconnect");
+      });
+
+      socket.on("error", (err) => {
+        console.error("Socket error:", err);
+        cleanup("socket-error");
+      });
+
+      socket.emit("terminal:ready");
+      if (FORCE_SHELL_POKE) {
+        setTimeout(() => {
+          try { ptyProcess.write("\n"); } catch {}
+        }, 100);
+      }
+
+    } catch (err) {
+      console.error("Terminal init error:", err && err.message || err);
+      socket.emit("terminal:error", "Terminal initialization failed");
+      cleanup("init-error");
+    }
+  });
+
+  return io;
+}
+</file>
+
+<file path="backend/src/configs/docker/index.js">
+import {config} from 'dotenv';
+config();
+import Docker from "dockerode";
+
+
+const docker = new Docker({
+  socketPath: process.env.DOCKER_SOCKET_PATH || "/var/run/docker.sock",
+  timeout: 30_000
+});
+
+export { docker };
+</file>
+
+<file path="backend/src/controllers/backup.controller.js">
+import { config } from "dotenv";
+config();
+
+import validator from "validator";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
+
+import { Instance } from "../models/instance.model.js";
+import { Backup } from "../models/backup.model.js";
+
+import {
+  createBackup as createBackupUtil,
+  restoreBackup as restoreBackupUtil,
+  listBackups as listBackupsUtil,
+  deleteBackup as deleteBackupUtil,
+} from "../utils/backup.util.js";
+
+
+
+const getUserInstance = async (userId) => {
+  const instance = await Instance.findOne({
+    where: { user_id: userId },
+  });
+
+  if (!instance) {
+    throw new ApiError(404, "Instance not found");
+  }
+
+  return instance;
+};
+
+
+const createBackup = asyncHandler(async (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) throw new ApiError(401, "Unauthorized");
+
+  const instance = await getUserInstance(userId);
+
+  const backup = await createBackupUtil({
+    username: req.user.username,
+    instanceId: instance.id,
+  });
+
+  return res
+    .status(201)
+    .json(new ApiResponse(201, backup, "Backup created successfully"));
+});
+
+
+const listBackups = asyncHandler(async (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) throw new ApiError(401, "Unauthorized");
+
+  const instance = await getUserInstance(userId);
+
+  const backups = await listBackupsUtil({
+    instanceId: instance.id,
+  });
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, backups, "Backups fetched successfully"));
+});
+
+
+const getBackup = asyncHandler(async (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) throw new ApiError(401, "Unauthorized");
+
+  const backupId = req.params.backupId;
+
+  if (!backupId || !validator.isInt(String(backupId), { min: 1 })) {
+    throw new ApiError(400, "Invalid backupId");
+  }
+
+  const instance = await getUserInstance(userId);
+
+  const backup = await Backup.findByPk(backupId);
+  if (!backup) throw new ApiError(404, "Backup not found");
+
+  if (backup.instance_id !== instance.id) {
+    throw new ApiError(403, "Forbidden");
+  }
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, backup, "Backup fetched successfully"));
+});
+
+
+const restoreBackup = asyncHandler(async (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) throw new ApiError(401, "Unauthorized");
+
+  const backupId = req.params.backupId;
+
+  if (!backupId || !validator.isInt(String(backupId), { min: 1 })) {
+    throw new ApiError(400, "Invalid backupId");
+  }
+
+  const instance = await getUserInstance(userId);
+
+  const backup = await Backup.findByPk(backupId);
+  if (!backup) throw new ApiError(404, "Backup not found");
+
+  if (backup.instance_id !== instance.id) {
+    throw new ApiError(403, "Forbidden");
+  }
+
+  await restoreBackupUtil({
+    backupId: Number(backupId),
+    instanceId: instance.id,
+  });
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, null, "Restore started successfully"));
+});
+
+
+const deleteBackup = asyncHandler(async (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) throw new ApiError(401, "Unauthorized");
+
+  const backupId = req.params.backupId;
+
+  if (!backupId || !validator.isInt(String(backupId), { min: 1 })) {
+    throw new ApiError(400, "Invalid backupId");
+  }
+
+  const instance = await getUserInstance(userId);
+
+  const backup = await Backup.findByPk(backupId);
+  if (!backup) throw new ApiError(404, "Backup not found");
+
+  if (backup.instance_id !== instance.id) {
+    throw new ApiError(403, "Forbidden");
+  }
+
+  await deleteBackupUtil({ backupId: Number(backupId) });
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, null, "Backup deleted successfully"));
+});
+
+export {
+  createBackup,
+  listBackups,
+  getBackup,
+  restoreBackup,
+  deleteBackup,
+};
+</file>
+
+<file path="backend/src/controllers/instance.controller.js">
+// controllers/instance.controller.js
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
+
+import { User } from "../models/user.model.js";
+import { Plan } from "../models/plan.model.js";
+import { Instance } from "../models/instance.model.js";
+
+import { Volume } from "../models/volume.model.js";
+
+import {
+  createAndRunInstance,
+  startInstance,
+  stopInstance,
+  removeInstance,
+  execInContainer
+} from "../utils/instance.util.js";
+
+
+
+const IMAGE_NAME =
+  process.env.INSTANCE_IMAGE || "lscr.io/linuxserver/code-server:latest";
+const NETWORK_NAME = process.env.DOCKER_NETWORK || "kodebox-net";
+
+function buildInstanceName(username) {
+  return `${username}-kodebox`;
+}
+
+function buildSubdomain(username) {
+  return `${username}-kodebox.prathamesh.site`;
+}
+
+function buildPassword(username, userId) {
+  return `${username}@${userId}`;
+}
+
+
+const LOCK_STALE_MS = Number(process.env.INSTANCE_LOCK_TTL_MS || 15 * 60 * 1000);
+
+async function ensureNotLocked(instance) {
+
+  if (!instance) return;
+
+
+  if (!instance.is_locked) return;
+
+
+  const lockedAt = instance.locked_at ? new Date(instance.locked_at) : null;
+  const now = Date.now();
+
+
+  if (!lockedAt || now - lockedAt.getTime() > LOCK_STALE_MS) {
+    try {
+
+      await Instance.update(
+        { is_locked: false, locked_at: null },
+        { where: { id: instance.id, is_locked: true } }
+      );
+      return;
+    } catch (err) {
+
+      throw new ApiError(423, "Instance is currently locked. Try again later.");
+    }
+  }
+
+
+  throw new ApiError(423, "Instance is currently locked. Try again later.");
+}
+
+
+
+const createInstance = asyncHandler(async (req, res) => {
+  const authUser = req.user;
+  if (!authUser?.id) throw new ApiError(401, "Unauthorized");
+
+  const user = await User.findByPk(authUser.id);
+  if (!user) throw new ApiError(404, "User not found");
+
+  const plan = await Plan.findByPk(user.plan_id);
+  if (!plan) throw new ApiError(400, "Invalid plan");
+
+  const instanceName = buildInstanceName(user.username);
+  const subdomain = buildSubdomain(user.username);
+  const password = buildPassword(user.username, user.id);
+
+
+  let instance = await Instance.findOne({
+    where: { user_id: user.id }
+  });
+
+
+  if (instance) await ensureNotLocked(instance);
+
+  if (instance && instance.status !== "deleted") {
+    throw new ApiError(409, "Instance already exists for this user");
+  }
+
+  try {
+    await createAndRunInstance({
+      instanceName,
+      volumeName: `${user.username}-workspace`,
+      subdomain,
+      password,
+      cpu: plan.cpu_limit,
+      memory: plan.memory_limit_mb,
+      network: NETWORK_NAME,
+      image: IMAGE_NAME
+    });
+  } catch (err) {
+    await removeInstance(instanceName).catch(() => { });
+    throw new ApiError(500, "Failed to create instance");
+  }
+
+
+  if (instance) {
+    instance.name = instanceName;
+    instance.image_name = IMAGE_NAME;
+    instance.instance_password = password;
+    instance.network_name = NETWORK_NAME;
+    instance.status = "running";
+    await instance.save();
+  } else {
+
+    instance = await Instance.create({
+      user_id: user.id,
+      name: instanceName,
+      image_name: IMAGE_NAME,
+      instance_password: password,
+      status: "running",
+      network_name: NETWORK_NAME
+    });
+  }
+
+
+
+
+  const volumeName = `${user.username}-workspace`;
+
+  const existingVolume = await Volume.findOne({
+    where: { instance_id: instance.id }
+  });
+
+  if (!existingVolume) {
+    await Volume.create({
+      volume_name: volumeName,
+      instance_id: instance.id,
+      mount_path: "/workspace",
+      size_limit_mb: plan.disk_limit_mb
+    });
+  }
+
+
+
+
+  return res.status(201).json(
+    new ApiResponse({
+      message: "Instance created",
+      data: {
+        hasInstance: true,
+        url: `https://${subdomain}`,
+        username: user.username,
+        password,
+        status: instance.status
+      }
+    })
+  );
+});
+
+
+
+const deleteInstance = asyncHandler(async (req, res) => {
+  const authUser = req.user;
+  if (!authUser?.id) throw new ApiError(401, "Unauthorized");
+
+  const instance = await Instance.findOne({
+    where: { user_id: authUser.id, status: ["running", "stopped"] }
+  });
+
+  if (!instance || instance.status === "deleted") {
+
+
+    return res.json(new ApiResponse({ message: "No instance to delete", data: { hasInstance: false } }));
+  }
+
+
+  await ensureNotLocked(instance);
+
+  await stopInstance(instance.name).catch(() => { });
+  await removeInstance(instance.name).catch(() => { });
+
+  instance.status = "deleted";
+  await instance.save();
+
+  return res.json(new ApiResponse({ message: "Instance deleted", data: { hasInstance: false } }));
+});
+
+
+
+const startInstanceController = asyncHandler(async (req, res) => {
+  const authUser = req.user;
+  if (!authUser?.id) throw new ApiError(401, "Unauthorized");
+
+  const instance = await Instance.findOne({
+    where: { user_id: authUser.id }
+  });
+
+  if (!instance || instance.status === "deleted") {
+    throw new ApiError(404, "No instance found to start");
+  }
+
+
+  if (instance.status === "running") {
+    return res.json(
+      new ApiResponse({
+        message: "Instance already running",
+        data: {
+          hasInstance: true,
+          url: `https://${buildSubdomain(req.user.username)}`,
+          status: instance.status
+        }
+      })
+    );
+  }
+
+
+  await ensureNotLocked(instance);
+
+
+  try {
+    await startInstance(instance.name);
+    instance.status = "running";
+    await instance.save();
+  } catch (err) {
+
+    await removeInstance(instance.name).catch(() => { });
+
+    instance.status = "deleted";
+    await instance.save().catch(() => { });
+    throw new ApiError(500, "Failed to start instance");
+  }
+
+  return res.json(
+    new ApiResponse({
+      message: "Instance started",
+      data: {
+        hasInstance: true,
+        url: `https://${buildSubdomain(req.user.username)}`,
+        status: instance.status
+      }
+    })
+  );
+});
+
+
+const stopInstanceController = asyncHandler(async (req, res) => {
+  const authUser = req.user;
+  if (!authUser?.id) throw new ApiError(401, "Unauthorized");
+
+  const instance = await Instance.findOne({
+    where: { user_id: authUser.id }
+  });
+
+  if (!instance || instance.status === "deleted") {
+
+    return res.json(new ApiResponse({ message: "No running instance", data: { hasInstance: false } }));
+  }
+
+
+  if (instance.status !== "running") {
+    return res.json(new ApiResponse({
+      message: "Instance is not running",
+      data: { hasInstance: true, status: instance.status }
+    }));
+  }
+
+
+  await ensureNotLocked(instance);
+
+
+  try {
+    await stopInstance(instance.name);
+    instance.status = "stopped";
+    await instance.save();
+  } catch (err) {
+
+    throw new ApiError(500, "Failed to stop instance");
+  }
+
+  return res.json(new ApiResponse({ message: "Instance stopped", data: { hasInstance: true, status: instance.status } }));
+});
+
+
+const resetWorkspace = asyncHandler(async (req, res) => {
+  const authUser = req.user;
+  if (!authUser?.id) throw new ApiError(401, "Unauthorized");
+
+  const instance = await Instance.findOne({
+    where: { user_id: req.user.id, status: "running" }
+  });
+
+  if (!instance) throw new ApiError(404, "Instance not running");
+
+
+  await ensureNotLocked(instance);
+
+  await execInContainer(instance.name, [
+    "sh",
+    "-lc",
+    "rm -rf /workspace/* && sync"
+  ]);
+
+  return res.json(new ApiResponse({ message: "Workspace reset", data: { hasInstance: true, status: instance.status } }));
+});
+
+
+
+const getInstanceLink = asyncHandler(async (req, res) => {
+  const authUser = req.user;
+  if (!authUser?.id) throw new ApiError(401, "Unauthorized");
+
+  const instance = await Instance.findOne({
+    where: { user_id: req.user.id }
+  });
+
+  if (!instance || instance.status === "deleted") {
+
+    return res.json(
+      new ApiResponse({
+        data: {
+          hasInstance: false
+        }
+      })
+    );
+  }
+
+
+  const isRunning = instance.status === "running";
+  return res.json(
+    new ApiResponse({
+      hasInstance: true,
+      status: instance.status,
+      url: isRunning ? `https://${buildSubdomain(req.user.username)}` : null,
+      workspace_password: instance.instance_password
+    })
+  );
+});
+
+
+
+const updateBackupSettings = asyncHandler(async (req, res) => {
+  const authUser = req.user;
+  if (!authUser?.id) throw new ApiError(401, "Unauthorized");
+
+  const { frequency } = req.body;
+
+  if (!["manual", "monthly"].includes(frequency)) {
+    throw new ApiError(400, "Invalid backup frequency. Choose 'manual' or 'monthly'.");
+  }
+
+  const user = await User.findByPk(authUser.id);
+  const plan = await Plan.findByPk(user.plan_id);
+
+  //Prevent free tier from enabling monthly auto-backups
+  if (frequency === "monthly" && !plan.is_backup_allowed) {
+    throw new ApiError(403, "Your current plan does not allow automated backups.");
+  }
+
+  const instance = await Instance.findOne({
+    where: { user_id: authUser.id }
+  });
+
+  if (!instance || instance.status === "deleted") {
+    throw new ApiError(404, "No active instance found.");
+  }
+
+  instance.backup_frequency = frequency;
+  await instance.save();
+
+  return res.json(
+    new ApiResponse(200, { backup_frequency: instance.backup_frequency }, "Backup settings updated successfully")
+  );
+});
+
+
+export {
+  createInstance,
+  deleteInstance,
+  startInstanceController,
+  stopInstanceController,
+  resetWorkspace,
+  getInstanceLink,
+  updateBackupSettings
+};
+</file>
+
+<file path="backend/src/controllers/plan.controller.js">
+import { ApiResponse } from "../utils/ApiResponse.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { Plan } from "../models/plan.model.js";
+
+const getPlans = asyncHandler(async (req, res) => {
+  const plans = await Plan.findAll({
+    where: { is_active: true }
+  });
+
+  res
+    .status(200)
+    .json(new ApiResponse(200, plans, 'Plans fetched successfully'));
+
+});
+
+
+export { getPlans };
+</file>
+
+<file path="backend/src/controllers/subscription.controller.js">
+import { razorpay } from "../configs/razorpay/index.js";
+import crypto from "crypto";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
+import { User } from "../models/user.model.js";
+import { Plan } from "../models/plan.model.js";
+import { Subscription } from "../models/subscription.model.js";
+import { Payment } from "../models/payment.model.js";
+import { sequelize } from "../configs/db/index.js";
+import { Op } from "sequelize";
+import { syncInstanceResourcesWithPlan } from "../utils/instance.util.js";
+
+const getRazorpayCustomerId = async (user) => {
+  if (user.razorpay_customer_id) return user.razorpay_customer_id;
+  try {
+    const existingCustomers = await razorpay.customers.all({ email: user.email, count: 1 });
+    let customerId;
+    if (existingCustomers.items && existingCustomers.items.length > 0) {
+      customerId = existingCustomers.items[0].id;
+    } else {
+      const newCustomer = await razorpay.customers.create({
+        name: user.full_name,
+        contact: String(user.phone_number),
+        email: user.email,
+        notes: { user_id: String(user.id) },
+      });
+      customerId = newCustomer.id;
+    }
+    user.razorpay_customer_id = customerId;
+    await user.save();
+    return customerId;
+  } catch (error) {
+    throw new ApiError(500, `Payment Setup Failed: ${error.message}`);
+  }
+};
+
+const createSubscription = asyncHandler(async (req, res) => {
+  const { planId } = req.body;
+  const userId = req.user.id;
+
+  if (!planId) throw new ApiError(400, "Plan ID is required");
+
+  const targetPlan = await Plan.findByPk(planId);
+  if (!targetPlan || targetPlan.price === 0) throw new ApiError(400, "Invalid plan selection.");
+
+  const activeSub = await Subscription.findOne({
+    where: { user_id: userId, status: "active", end_at: { [Op.gt]: new Date() } },
+    include: [{ model: Plan, as: 'Plan', attributes: ['name'] }]
+  });
+
+  if (activeSub) {
+    throw new ApiError(400, `You already have an active ${activeSub.Plan.name} plan.`);
+  }
+
+  const user = await User.findByPk(userId);
+  const customerId = await getRazorpayCustomerId(user);
+
+  try {
+    const subscriptionOptions = {
+      plan_id: targetPlan.razorpay_plan_id,
+      customer_id: customerId,
+      total_count: 6,
+      quantity: 1,
+      addons: [],
+      notes: {
+        user_id: String(userId),
+        internal_plan_id: String(planId),
+      },
+    };
+
+    const subscription = await razorpay.subscriptions.create(subscriptionOptions);
+
+    return res.status(200).json(new ApiResponse(200, {
+      subscription_id: subscription.id,
+      key_id: process.env.RAZORPAY_KEY_ID,
+      plan_name: targetPlan.name,
+      amount: targetPlan.price,
+    }, "Subscription initiated"));
+  } catch (error) {
+    throw new ApiError(500, error.message || "Failed to initiate subscription");
+  }
+});
+
+const verifySubscription = asyncHandler(async (req, res) => {
+  const { razorpay_payment_id, razorpay_subscription_id, razorpay_signature } = req.body;
+  const userId = req.user.id;
+
+  if (!razorpay_payment_id || !razorpay_subscription_id || !razorpay_signature) {
+    throw new ApiError(400, "Missing payment verification details");
+  }
+
+  const generated_signature = crypto
+    .createHmac("sha256", process.env.RAZORPAY_KEY_SECRET)
+    .update(razorpay_payment_id + "|" + razorpay_subscription_id)
+    .digest("hex");
+
+  if (generated_signature !== razorpay_signature) {
+    throw new ApiError(400, "Invalid payment signature. Trust denied.");
+  }
+
+  const transaction = await sequelize.transaction();
+
+  try {
+    let subDetails;
+    try {
+      subDetails = await razorpay.subscriptions.fetch(razorpay_subscription_id);
+    } catch (e) {
+      throw new ApiError(500, "Unable to verify subscription status");
+    }
+
+    const planId = subDetails.notes.internal_plan_id;
+    const startDate = new Date(subDetails.current_start * 1000);
+    const endDate = new Date(subDetails.current_end * 1000);
+    const plan = await Plan.findByPk(planId);
+
+    let subscription = await Subscription.findOne({ where: { razorpay_subscription_id }, transaction });
+
+    if (!subscription) {
+      subscription = await Subscription.create({
+        user_id: userId,
+        plan_id: planId,
+        status: "active",
+        razorpay_subscription_id: razorpay_subscription_id,
+        start_at: startDate,
+        end_at: endDate,
+      }, { transaction });
+    } else {
+      subscription.status = "active";
+      subscription.end_at = endDate;
+      subscription.plan_id = planId;
+      await subscription.save({ transaction });
+    }
+
+    const existingPayment = await Payment.findOne({ where: { razorpay_payment_id }, transaction });
+    if (!existingPayment) {
+      await Payment.create({
+        subscription_id: subscription.id,
+        razorpay_payment_id: razorpay_payment_id,
+        amount: plan.price,
+        status: "success",
+        paid_at: startDate,
+      }, { transaction });
+    }
+
+    await User.update({ plan_id: planId }, { where: { id: userId }, transaction });
+    await transaction.commit();
+
+    await syncInstanceResourcesWithPlan(userId, planId);
+
+    return res.status(200).json(new ApiResponse(200, null, "Subscription activated successfully"));
+  } catch (error) {
+    await transaction.rollback();
+    throw new ApiError(500, "Payment successful but activation processing failed. Check back in a minute.");
+  }
+});
+
+const getMySubscription = asyncHandler(async (req, res) => {
+  const userId = req.user.id;
+
+  const subscription = await Subscription.findOne({
+    where: { user_id: userId },
+    order: [['created_at', 'DESC']],
+    include: [{ model: Plan, as: 'Plan', attributes: ['name', 'price', 'cpu_limit', 'memory_limit_mb'] }]
+  });
+
+  if (subscription && subscription.status === 'active' && new Date(subscription.end_at) < new Date()) {
+    subscription.status = 'expired';
+    await subscription.save({ hooks: false });
+    
+    const freePlan = await Plan.findOne({ where: { name: "Free" } });
+    const freePlanId = freePlan ? freePlan.id : 1;
+
+    await User.update({ plan_id: freePlanId }, { where: { id: userId } });
+    await syncInstanceResourcesWithPlan(userId, freePlanId);
+  }
+
+  const user = await User.findByPk(userId, { attributes: ['plan_id'] });
+  const currentPlan = await Plan.findByPk(user.plan_id || 1);
+
+  return res.status(200).json(new ApiResponse(200, {
+    current_plan: currentPlan,
+    subscription_details: subscription || null
+  }, "Subscription details fetched"));
+});
+
+export { createSubscription, verifySubscription, getMySubscription };
+</file>
+
+<file path="backend/src/controllers/webhook.controller.js">
+import crypto from "crypto";
+import { Subscription } from "../models/subscription.model.js";
+import { Payment } from "../models/payment.model.js";
+import { User } from "../models/user.model.js";
+import { Plan } from "../models/plan.model.js";
+import { syncInstanceResourcesWithPlan } from "../utils/instance.util.js";
+
+const handleRazorpayWebhook = async (req, res) => {
+  const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
+  const signature = req.headers["x-razorpay-signature"];
+
+  if (!signature) {
+    console.error("[WEBHOOK ERROR] Missing x-razorpay-signature header");
+    return res.status(400).json({ status: "failed", message: "No signature" });
+  }
+
+  try {
+    const bodyString = req.body.toString('utf8');
+
+    const shasum = crypto.createHmac("sha256", secret);
+    shasum.update(bodyString);
+    const digest = shasum.digest("hex");
+
+    if (digest !== signature) {
+      console.error("[WEBHOOK ERROR] Signature mismatch! Check your RAZORPAY_WEBHOOK_SECRET in .env");
+      return res.status(400).json({ status: "failed", message: "Invalid signature" });
+    }
+
+    const parsedBody = JSON.parse(bodyString);
+    const event = parsedBody.event;
+    const payload = parsedBody.payload;
+
+    console.log(`[WEBHOOK] Received verified event: ${event}`);
+
+    if (event === "subscription.charged") {
+      const subEntity = payload.subscription.entity;
+      const paymentEntity = payload.payment.entity;
+
+      const userId = subEntity.notes?.user_id;
+      const planId = subEntity.notes?.internal_plan_id;
+
+      if (!userId || !planId) {
+        console.warn("[WEBHOOK WARNING] Missing user_id or plan_id in notes. Ignoring.");
+        return res.status(200).json({ status: "ignored" });
+      }
+
+      const currentStart = new Date(subEntity.current_start * 1000);
+      const currentEnd = new Date(subEntity.current_end * 1000);
+
+      let subscription = await Subscription.findOne({
+        where: { razorpay_subscription_id: subEntity.id },
+      });
+
+      if (!subscription) {
+        subscription = await Subscription.create({
+          user_id: userId,
+          plan_id: planId,
+          status: "active",
+          razorpay_subscription_id: subEntity.id,
+          start_at: currentStart,
+          end_at: currentEnd,
+        });
+      } else {
+        subscription.end_at = currentEnd;
+        subscription.status = "active";
+        subscription.plan_id = planId;
+        await subscription.save();
+      }
+
+      const existingPayment = await Payment.findOne({
+        where: { razorpay_payment_id: paymentEntity.id }
+      });
+
+      if (!existingPayment) {
+        await Payment.create({
+          subscription_id: subscription.id,
+          razorpay_payment_id: paymentEntity.id,
+          amount: paymentEntity.amount / 100,
+          status: "success",
+          paid_at: new Date(),
+        });
+      }
+
+      await User.update({ plan_id: planId }, { where: { id: userId } });
+      await syncInstanceResourcesWithPlan(userId, planId);
+      
+      console.log(`[WEBHOOK SUCCESS] Upgraded User ${userId} to Plan ${planId}`);
+
+    } 
+    else if (event === "subscription.halted" || event === "subscription.cancelled") {
+      const subEntity = payload.subscription.entity;
+
+      const subscription = await Subscription.findOne({
+        where: { razorpay_subscription_id: subEntity.id },
+      });
+
+      if (subscription) {
+        subscription.status = "expired";
+        await subscription.save();
+
+        const freePlan = await Plan.findOne({ where: { name: "Free" } });
+        const freePlanId = freePlan ? freePlan.id : 1;
+
+        await User.update({ plan_id: freePlanId }, { where: { id: subscription.user_id } });
+        await syncInstanceResourcesWithPlan(subscription.user_id, freePlanId);
+        
+        console.log(`[WEBHOOK DOWNGRADE] Downgraded User ${subscription.user_id} to Free Plan`);
+      }
+    }
+
+    res.status(200).json({ status: "ok" });
+  } catch (error) {
+    console.error("[WEBHOOK FATAL ERROR]:", error);
+    res.status(200).json({ status: "error_logged" }); 
+  }
+};
+
+export { handleRazorpayWebhook };
+</file>
+
+<file path="backend/src/models/backup.model.js">
+import { DataTypes } from "sequelize";
+import { sequelize } from "../configs/db/index.js";
+
+const Backup = sequelize.define(
+  "Backup",
+  {
+    id: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      autoIncrement: true,
+      primaryKey: true,
+    },
+
+    instance_id: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      allowNull: false,
+    },
+
+    volume_id: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      allowNull: false,
+    },
+
+    object_path: {
+      type: DataTypes.TEXT,
+      allowNull: false,
+    },
+
+    size_mb: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+    },
+
+  },
+  {
+    tableName: "backups",
+    timestamps: true,
+    createdAt: "created_at",
+    updatedAt: false,
+
+    indexes: [
+      { fields: ["instance_id"] },
+      { fields: ["volume_id"] },
+    ],
+  }
+);
+
+export { Backup };
+</file>
+
+<file path="backend/src/models/instance.model.js">
+import { DataTypes } from "sequelize";
+import { sequelize } from "../configs/db/index.js";
+
+const Instance = sequelize.define(
+  "Instance",
+  {
+    id: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      autoIncrement: true,
+      primaryKey: true,
+    },
+    user_id: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      allowNull: false,
+    },
+    name: {
+      type: DataTypes.STRING(100),
+      allowNull: false,
+    },
+    image_name: {
+      type: DataTypes.STRING(100),
+      allowNull: false,
+    },
+    instance_password: {
+      type: DataTypes.STRING(255),
+      allowNull: false,
+    },
+    status: {
+      type: DataTypes.ENUM("running", "stopped", "deleted"),
+      allowNull: false,
+      defaultValue: "stopped",
+    },
+    network_name: {
+      type: DataTypes.STRING(100),
+      allowNull: false,
+    },
+    is_locked: {
+      type: DataTypes.BOOLEAN,
+      allowNull: false,
+      defaultValue: false,
+    },
+    locked_at: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      defaultValue: null,
+    },
+
+    backup_frequency: {
+      type: DataTypes.ENUM("manual", "monthly"),
+      allowNull: false,
+      defaultValue: "manual",
+    },
+    last_backup_at: {
+      type: DataTypes.DATE,
+      allowNull: true,
+      defaultValue: null,
+    },
+  },
+  {
+    tableName: "instances",
+    timestamps: true,
+    createdAt: "created_at",
+    updatedAt: "updated_at",
+    indexes: [
+      { fields: ["user_id"] },
+      { fields: ["is_locked"] },
+    ],
+  }
+);
+
+export { Instance };
+</file>
+
+<file path="backend/src/models/payment.model.js">
+import { DataTypes } from "sequelize";
+import { sequelize } from "../configs/db/index.js";
+
+const Payment = sequelize.define(
+  "Payment",
+  {
+    id: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      autoIncrement: true,
+      primaryKey: true,
+    },
+
+    subscription_id: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      allowNull: false,
+    },
+
+    razorpay_payment_id: {
+      type: DataTypes.STRING(100),
+      allowNull: false,
+    },
+
+    amount: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+    },
+
+    status: {
+      type: DataTypes.ENUM("success", "failed", "refunded"),
+      allowNull: false,
+    },
+
+    paid_at: {
+      type: DataTypes.DATE,
+      allowNull: true,
+    },
+  },
+  {
+    tableName: "payments",
+    timestamps: true,
+    createdAt: "created_at",
+    updatedAt: false,
+
+    indexes: [{ fields: ["subscription_id"] }],
+  }
+);
+
+export { Payment };
+</file>
+
+<file path="backend/src/models/plan.model.js">
+import { DataTypes } from "sequelize";
+import { sequelize } from "../configs/db/index.js";
+
+const Plan = sequelize.define(
+  "Plan",
+  {
+    id: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      autoIncrement: true,
+      primaryKey: true,
+    },
+
+    name: {
+      type: DataTypes.ENUM("Free", "Starter", "Pro"),
+      allowNull: false,
+      unique: true,
+    },
+
+    price: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+    },
+
+    razorpay_plan_id: {
+      type: DataTypes.STRING(100),
+      allowNull: true, // NULL for free
+    },
+
+    cpu_limit: {
+      type: DataTypes.FLOAT,
+      allowNull: false,
+    },
+
+    memory_limit_mb: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+    },
+
+    disk_limit_mb: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+    },
+
+    is_backup_allowed: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false,
+    },
+
+    backup_retention_months: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+      defaultValue: 0,
+    },
+  },
+  {
+    tableName: "plans",
+    timestamps: false,
+  }
+);
+
+export { Plan };
+</file>
+
+<file path="backend/src/models/subscription.model.js">
+import { DataTypes } from "sequelize";
+import { sequelize } from "../configs/db/index.js";
+
+const Subscription = sequelize.define(
+  "Subscription",
+  {
+    id: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      autoIncrement: true,
+      primaryKey: true,
+    },
+
+    user_id: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      allowNull: false,
+    },
+
+    plan_id: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      allowNull: false,
+    },
+
+    status: {
+      type: DataTypes.ENUM("active", "expired"),
+      allowNull: false,
+      defaultValue: "active",
+    },
+
+    start_at: {
+      type: DataTypes.DATE,
+      allowNull: false,
+    },
+
+    end_at: {
+      type: DataTypes.DATE,
+      allowNull: false,
+    },
+
+    razorpay_subscription_id: {
+      type: DataTypes.STRING(100),
+      allowNull: false,
+    },
+  },
+  {
+    tableName: "subscriptions",
+    timestamps: true,
+    createdAt: "created_at",
+    updatedAt: false,
+
+    indexes: [
+      { fields: ["user_id"] },
+      { fields: ["plan_id"] },
+      { fields: ["status"] },
+      { fields: ["end_at"] },
+      { fields: ["razorpay_subscription_id"] },
+    ],
+  }
+);
+
+export { Subscription };
+</file>
+
+<file path="backend/src/models/volume.model.js">
+import { DataTypes } from "sequelize";
+import { sequelize } from "../configs/db/index.js";
+
+const Volume = sequelize.define(
+  "Volume",
+  {
+    id: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      autoIncrement: true,
+      primaryKey: true,
+    },
+
+    volume_name: {
+      type: DataTypes.STRING(100),
+      allowNull: false,
+    },
+
+    instance_id: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      allowNull: false,
+    },
+
+    mount_path: {
+      type: DataTypes.STRING(255),
+      allowNull: false,
+    },
+
+    size_limit_mb: {
+      type: DataTypes.INTEGER,
+      allowNull: false,
+    },
+  },
+  {
+    tableName: "volumes",
+    timestamps: true,
+    createdAt: "created_at",
+    updatedAt: false,
+
+    indexes: [{ fields: ["instance_id"] }],
+  }
+);
+
+export { Volume };
+</file>
+
+<file path="backend/src/routes/backup.route.js">
+import { Router } from "express";
+import { isAuthenticated } from "../middlewares/auth.middleware.js";
+
+import {
+  createBackup,
+  listBackups,
+  getBackup,
+  restoreBackup,
+  deleteBackup,
+} from "../controllers/backup.controller.js";
+
+const backupRouter = Router();
+
+backupRouter.use(isAuthenticated);
+
+backupRouter.post("/instance/backups", createBackup);
+
+backupRouter.get("/instance/backups", listBackups);
+
+backupRouter.post("/instance/backups/:backupId/restore", restoreBackup);
+
+backupRouter.get("/backups/:backupId", getBackup);
+
+backupRouter.delete("/backups/:backupId", deleteBackup);
+
+export { backupRouter };
+</file>
+
+<file path="backend/src/routes/instance.route.js">
+import { Router } from "express";
+import { isAuthenticated } from "../middlewares/auth.middleware.js";
+
+import {
+  createInstance,
+  deleteInstance,
+  startInstanceController,
+  stopInstanceController,
+  resetWorkspace,
+  getInstanceLink,
+  updateBackupSettings
+} from "../controllers/instance.controller.js";
+
+const instanceRouter = Router();
+
+instanceRouter.use(isAuthenticated);
+
+
+instanceRouter.post("/", createInstance);
+
+instanceRouter.delete("/", deleteInstance);
+
+instanceRouter.post("/start", startInstanceController);
+
+instanceRouter.post("/stop", stopInstanceController);
+
+instanceRouter.post("/reset-workspace", resetWorkspace);
+
+instanceRouter.get("/link", getInstanceLink);
+
+instanceRouter.patch("/backup-settings", updateBackupSettings);
+
+export { instanceRouter };
+</file>
+
+<file path="backend/src/routes/plan.route.js">
+import { Router } from "express";
+import { getPlans } from "../controllers/plan.controller.js";
+
+const planRouter = Router();
+
+
+planRouter.get('/', getPlans);
+
+export { planRouter };
+</file>
+
+<file path="backend/src/routes/subscription.route.js">
+import { Router } from "express";
+import {
+    createSubscription,
+    verifySubscription,
+    getMySubscription
+} from "../controllers/subscription.controller.js";
+import { isAuthenticated } from "../middlewares/auth.middleware.js";
+
+const subscriptionRouter = Router();
+
+subscriptionRouter.use(isAuthenticated);
+
+subscriptionRouter.post("/create", createSubscription);
+
+subscriptionRouter.post("/verify", verifySubscription);
+
+subscriptionRouter.get("/current", getMySubscription);
+
+export { subscriptionRouter };
+</file>
+
+<file path="backend/src/routes/webhook.route.js">
+import { Router } from "express";
+import { handleRazorpayWebhook } from "../controllers/webhook.controller.js";
+
+const razorpayWebhookRouter = Router();
+
+// Note: No auth middleware here. Razorpay calls this server-to-server.
+// Validation is done via the Signature in the controller.
+razorpayWebhookRouter.post("/razorpay", handleRazorpayWebhook);
+
+export { razorpayWebhookRouter };
+</file>
+
+<file path="backend/src/utils/backup.util.js">
+import { createGzip } from "zlib";
+import { DeleteObjectCommand, GetObjectCommand } from "@aws-sdk/client-s3";
+import { Upload } from "@aws-sdk/lib-storage";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { Backup } from "../models/backup.model.js";
+import { Volume } from "../models/volume.model.js";
+import { Instance } from "../models/instance.model.js";
+import { s3 } from "../configs/S3/index.js";
+import { docker } from "../configs/docker/index.js";
+
+const BUCKET = process.env.AWS_S3_BUCKET;
+const HELPER_IMAGE = "alpine:3.19";
+
+const toggleLock = async (id, state) => {
+  const [updated] = await Instance.update(
+    { is_locked: state, locked_at: state ? new Date() : null },
+    { where: { id, is_locked: !state } }
+  );
+  if (state && !updated) throw new Error("Instance is locked.");
+};
+
+async function ensureImage(imageName) {
+  try {
+    const image = docker.getImage(imageName);
+    await image.inspect();
+  } catch (error) {
+    return new Promise((resolve, reject) => {
+      docker.pull(imageName, (err, stream) => {
+        if (err) return reject(err);
+        docker.modem.followProgress(stream, (onFinishedErr, output) => {
+          if (onFinishedErr) return reject(onFinishedErr);
+          resolve(output);
+        });
+      });
+    });
+  }
+}
+
+async function runContainer(cmd, mounts, wait = false) {
+  await ensureImage(HELPER_IMAGE);
+  const container = await docker.createContainer({
+    Image: HELPER_IMAGE,
+    Cmd: cmd,
+    HostConfig: { Binds: mounts },
+  });
+  
+  await container.start();
+  
+  if (wait) {
+    await container.wait();
+  }
+  
+  return container;
+}
+
+async function createBackup({ username, instanceId }) {
+  await toggleLock(instanceId, true);
+  let helperContainer = null;
+  
+  try {
+    const vol = await Volume.findOne({ where: { instance_id: instanceId } });
+    const instance = await Instance.findByPk(instanceId);
+    
+    const targetContainer = docker.getContainer(instance.name);
+    
+    const containerInfo = await targetContainer.inspect().catch(() => null);
+    const wasRunning = containerInfo?.State?.Running === true;
+
+    await targetContainer.stop().catch(() => { });
+
+    const key = `workspace-backups/${username}/${Date.now()}.tar.gz`;
+
+    helperContainer = await runContainer(["sleep", "300"], [`${vol.volume_name}:/workspace:ro`]);
+
+    const archiveStream = await helperContainer.getArchive({ path: "/workspace" });
+    
+    await new Upload({
+      client: s3, 
+      params: { Bucket: BUCKET, Key: key, Body: archiveStream.pipe(createGzip()) }
+    }).done();
+
+    await Backup.create({ instance_id: instanceId, volume_id: vol.id, object_path: key, size_mb: 0 });
+    await instance.update({ last_backup_at: new Date() });
+    await enforceBackupLimit(instanceId);
+    
+    if (wasRunning) {
+      await targetContainer.start().catch(() => { });
+    }
+  } finally {
+    if (helperContainer) await helperContainer.remove({ force: true }).catch(() => { });
+    await toggleLock(instanceId, false);
+  }
+}
+
+async function restoreBackup({ backupId, instanceId }) {
+  await toggleLock(instanceId, true);
+  let helperContainer = null;
+  
+  try {
+    const backup = await Backup.findByPk(backupId);
+    const vol = await Volume.findOne({ where: { instance_id: instanceId } });
+    const instance = await Instance.findByPk(instanceId);
+    
+    const targetContainer = docker.getContainer(instance.name);
+
+    const containerInfo = await targetContainer.inspect().catch(() => null);
+    const wasRunning = containerInfo?.State?.Running === true;
+
+    await targetContainer.stop().catch(() => { });
+
+    const url = await getSignedUrl(s3, new GetObjectCommand({ Bucket: BUCKET, Key: backup.object_path }), { expiresIn: 300 });
+
+    const cmd = `find /workspace -mindepth 1 -delete && wget -qO- "${url}" | tar xz -C /workspace --strip-components=1`;
+
+    helperContainer = await runContainer(["sh", "-c", cmd], [`${vol.volume_name}:/workspace:rw`], true);
+    
+    if (wasRunning) {
+      await targetContainer.start().catch(() => { });
+    }
+  } finally {
+    if (helperContainer) await helperContainer.remove({ force: true }).catch(() => { });
+    await toggleLock(instanceId, false);
+  }
+}
+
+async function enforceBackupLimit(instanceId) {
+  const backups = await Backup.findAll({ where: { instance_id: instanceId }, order: [["created_at", "DESC"]] });
+  if (backups.length > 7) {
+    for (const b of backups.slice(7)) await deleteBackup({ backupId: b.id });
+  }
+}
+
+async function listBackups({ instanceId }) {
+  return Backup.findAll({ where: { instance_id: instanceId }, order: [["created_at", "DESC"]] });
+}
+
+async function deleteBackup({ backupId }) {
+  const b = await Backup.findByPk(backupId);
+  if (b) {
+    await s3.send(new DeleteObjectCommand({ Bucket: BUCKET, Key: b.object_path })).catch(() => { });
+    await b.destroy();
+  }
+}
+
+export { createBackup, restoreBackup, enforceBackupLimit, listBackups, deleteBackup };
+</file>
+
+<file path="backend/src/utils/instance.util.js">
+import { docker } from "../configs/docker/index.js";
+import { Plan } from "../models/plan.model.js";
+import { Instance } from "../models/instance.model.js";
+import { Volume } from "../models/volume.model.js";
+
+function buildInstancePayload({
+  instanceName,
+  volumeName,
+  subdomain,
+  password,
+  cpu,
+  memory,
+  pidsLimit = 256,
+  network,
+  image,
+}) {
+  const memoryBytes = Math.floor(memory * 1024 * 1024);
+  return {
+    Image: image,
+    Env: [
+      "PUID=1000",
+      "PGID=1000",
+      `PASSWORD=${password}`,
+      `SUDO_PASSWORD=${password}`,
+      "DEFAULT_WORKSPACE=/workspace",
+    ],
+    HostConfig: {
+      NetworkMode: network,
+      Binds: [`${volumeName}:/workspace`],
+      RestartPolicy: { Name: "unless-stopped" },
+      NanoCpus: Math.floor(cpu * 1_000_000_000), 
+      Memory: memoryBytes,
+      MemorySwap: memoryBytes, 
+      PidsLimit: pidsLimit,
+    },
+    Labels: {
+      "traefik.enable": "true",
+      [`traefik.http.routers.${instanceName}.rule`]: `Host(\`${subdomain}\`)`,
+      [`traefik.http.routers.${instanceName}.entrypoints`]: "web",
+      [`traefik.http.services.${instanceName}.loadbalancer.server.port`]: "8443",
+      app: "kodebox",
+    },
+  };
+}
+
+async function createVolume(name) {
+  return docker.createVolume({ Name: name });
+}
+
+async function removeVolume(name) {
+  const volume = docker.getVolume(name);
+  return volume.remove();
+}
+
+async function createInstance(cfg) {
+  const container = await docker.createContainer({
+    name: cfg.instanceName,
+    ...buildInstancePayload(cfg)
+  });
+  return container.id;
+}
+
+async function startInstance(containerIdentifier) {
+  const container = docker.getContainer(containerIdentifier);
+  return container.start();
+}
+
+async function stopInstance(containerIdentifier) {
+  const container = docker.getContainer(containerIdentifier);
+  return container.stop();
+}
+
+async function removeInstance(containerIdentifier) {
+  const container = docker.getContainer(containerIdentifier);
+  return container.remove({ force: true });
+}
+
+async function execInContainer(containerIdentifier, cmd) {
+  const container = docker.getContainer(containerIdentifier);
+  
+  const exec = await container.exec({
+    AttachStdout: true,
+    AttachStderr: true,
+    Cmd: cmd,
+    Tty: false,
+  });
+
+  return new Promise((resolve, reject) => {
+    exec.start({ Detach: false, Tty: false }, (err, stream) => {
+      if (err) return reject(err);
+      stream.on("end", resolve);
+      stream.on("error", reject);
+      stream.resume(); 
+    });
+  });
+}
+
+async function createAndRunInstance(cfg) {
+  const id = await createInstance(cfg);
+  await startInstance(id);
+
+  await execInContainer(id, [
+    "sh",
+    "-c",
+    `
+    if [ -d "/workspace" ]; then
+      chown -R 1000:1000 /workspace || true
+    fi
+    `
+  ]).catch((err) => {
+    console.error("Workspace chown failed:", err);
+  });
+
+  return id;
+}
+
+/**
+ * Dynamically updates an existing container's resources.
+ */
+async function updateInstanceResources(containerIdentifier, cpu, memory) {
+  const container = docker.getContainer(containerIdentifier);
+  const memoryBytes = Math.floor(memory * 1024 * 1024);
+  
+  return container.update({
+    NanoCpus: Math.floor(cpu * 1_000_000_000),
+    Memory: memoryBytes,
+    MemorySwap: memoryBytes
+  });
+}
+
+/**
+ * Synchronizes a user's database plan with their actual Docker container.
+ */
+async function syncInstanceResourcesWithPlan(userId, planId) {
+  try {
+    const plan = await Plan.findByPk(planId);
+    if (!plan) return;
+
+    const instance = await Instance.findOne({ where: { user_id: userId } });
+    if (!instance) return;
+
+    if (instance.status !== "deleted") {
+      try {
+        await updateInstanceResources(instance.name, plan.cpu_limit, plan.memory_limit_mb);
+        console.log(`[SYNC] Updated Docker resources for instance: ${instance.name} to Plan ID: ${plan.id}`);
+      } catch (err) {
+        console.error(`[SYNC ERROR] Failed to update Docker resources for ${instance.name}:`, err.message);
+      }
+    }
+
+    const volume = await Volume.findOne({ where: { instance_id: instance.id } });
+    if (volume) {
+      volume.size_limit_mb = plan.disk_limit_mb;
+      await volume.save();
+    }
+
+    if (!plan.is_backup_allowed && instance.backup_frequency !== "manual") {
+      instance.backup_frequency = "manual";
+      await instance.save();
+    }
+  } catch (error) {
+    console.error("[SYNC FATAL ERROR] Container sync failed:", error);
+  }
+}
+
+export {
+  buildInstancePayload,
+  createVolume,
+  removeVolume,
+  createInstance,
+  startInstance,
+  stopInstance,
+  removeInstance,
+  createAndRunInstance,
+  execInContainer,
+  updateInstanceResources,
+  syncInstanceResourcesWithPlan
+};
+</file>
+
+<file path="backend/src/utils/seedPlan.js">
+import { sequelize } from "../configs/db/index.js";
+import { Plan } from "../models/plan.model.js";
+import { config } from "dotenv";
+config();
+
+async function seedPlans() {
+  try {
+    console.log("Seeding plans...");
+
+    //Connect to DB
+    await sequelize.authenticate();
+    console.log("Database connected");
+
+
+    await sequelize.sync({ alter: false });
+    console.log("Tables synced (created if not present)");
+
+    const plans = [
+      {
+        name: "Free",
+        price: 0,
+        razorpay_plan_id: "free_plan",
+        cpu_limit: 1,
+        memory_limit_mb: 1024,
+        disk_limit_mb: 7168,
+        is_backup_allowed: false,
+        backup_retention_months: 0,
+        commitment_months: 0,
+      },
+      {
+        name: "Starter",
+        price: 249,
+        razorpay_plan_id: "plan_RzlBYZId9bOsMO",
+        cpu_limit: 2,
+        memory_limit_mb: 2048,
+        disk_limit_mb: 15360,
+        is_backup_allowed: true,
+        backup_retention_months: 6,
+        commitment_months: 6,
+      },
+      {
+        name: "Pro",
+        price: 499,
+        razorpay_plan_id: "plan_RzlF2pNzUltpnP",
+        cpu_limit: 4,
+        memory_limit_mb: 4096,
+        disk_limit_mb: 25600,
+        is_backup_allowed: true,
+        backup_retention_months: 6,
+        commitment_months: 6,
+      },
+    ];
+
+
+    for (const plan of plans) {
+      const [_, created] = await Plan.findOrCreate({
+        where: { name: plan.name },
+        defaults: plan,
+      });
+
+      if (created) {
+        console.log(`Created plan: ${plan.name}`);
+      } else {
+        console.log(`Plan already exists: ${plan.name}`);
+      }
+    }
+
+    console.log("Plan seeding completed successfully");
+    process.exit(0);
+  } catch (error) {
+    console.error("Plan seeding failed:", error);
+    process.exit(1);
+  }
+}
+
+seedPlans();
+</file>
+
+<file path="backend/Dockerfile">
+FROM alpine:3.19
+
+RUN apk add --no-cache \
+    tar \
+    wget \
+    ca-certificates \
+    bash
+
+WORKDIR /workspace
+
+CMD ["sh"]
+</file>
+
+<file path="backend/src/configs/email/templates/otp.template.js">
+import { config } from "dotenv";
+config();
+
+const otpTemplate = (otp) => {
+  return `<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="UTF-8" />
+    <title>${process.env.APP_NAME} Email Verification</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background-color: #f4f6f8;
+        margin: 0;
+        padding: 0;
+        color: #333;
+      }
+      .container {
+        max-width: 600px;
+        margin: 40px auto;
+        background: #fff;
+        padding: 30px;
+        border-radius: 8px;
+        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.05);
+      }
+      .header {
+        text-align: center;
+        color: #2e4a80;
+      }
+      .otp-box {
+        font-size: 24px;
+        background-color: #eef1f7;
+        padding: 15px;
+        text-align: center;
+        letter-spacing: 6px;
+        font-weight: bold;
+        border-radius: 6px;
+        color: #2e4a80;
+        margin: 20px 0;
+      }
+      .footer {
+        margin-top: 30px;
+        font-size: 12px;
+        text-align: center;
+        color: #777;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="container">
+      <h2 class="header">${process.env.APP_NAME} Email Verification</h2>
+
+      <p>Hi there,</p>
+
+      <p>
+        Thank you for signing up on <strong>${process.env.APP_NAME}</strong>.
+        To complete your registration, please verify your email address using the OTP below:
+      </p>
+
+      <div class="otp-box">${otp}</div>
+
+      <p>
+        This OTP is valid for the next
+        <strong>${process.env.OTP_EXPIRY} minutes</strong>.
+      </p>
+
+      <p>
+        If you did not request this verification, you can safely ignore this email.
+        No account will be created without verification.
+      </p>
+
+      <p>
+        Regards,<br />
+        The ${process.env.APP_NAME} Team
+      </p>
+
+      <div class="footer">
+        &copy; ${new Date().getFullYear()} ${process.env.APP_NAME}. All rights reserved.<br />
+        Need help? Contact us at
+        <a href="mailto:support@${process.env.APP_DOMAIN}">
+          support@${process.env.APP_DOMAIN}
+        </a>
+      </div>
+    </div>
+  </body>
+</html>`;
+};
+
+export { otpTemplate };
+</file>
+
+<file path="backend/src/configs/email/index.js">
+import {config} from 'dotenv';
+config();
+import nodemailer from 'nodemailer';
+
+
+
+const sendMail = async ({to, subject = "", text = "", html = ""}) => {
+  const transporter = nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+      user: process.env.GMAIL_TRANSPORTER,
+      pass: process.env.GMAIL_PASS,
+    },
+  });
+
+  const info = await transporter.sendMail({
+    from: `"${process.env.APP_NAME}" <${process.env.GMAIL_TRANSPORTER}>`,
+    to,
+    subject,
+    text,
+    html,
+  });
+
+  console.log("Message sent:", info.messageId);
+};
+
+export { sendMail };
+</file>
+
+<file path="backend/src/configs/razorpay/index.js">
+import {config} from 'dotenv';
+config();
+import Razorpay from "razorpay";
+
+export const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET,
+});
+</file>
+
+<file path="backend/src/configs/S3/index.js">
+import {config} from 'dotenv';
+config();
+import { S3Client } from "@aws-sdk/client-s3";
+
+const s3 = new S3Client({
+  region: process.env.AWS_REGION,
+  credentials: {
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+    secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
+  }
+});
+
+export {s3};
+</file>
+
+<file path="backend/src/controllers/auth.controller.js">
+import { config } from "dotenv";
+config();
+
+import validator from "validator";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
+import { EmailVerification } from "../models/email-verification.model.js";
+import {
+  generateAccessToken,
+  generateOTP,
+  generateRefreshToken,
+  hashRefreshToken,
+} from "../utils/auth.util.js";
+import { sendMail } from "../configs/email/index.js";
+import { otpTemplate } from "../configs/email/templates/otp.template.js";
+import { User } from "../models/user.model.js";
+import bcrypt from "bcrypt";
+import ms from "ms";
+import jwt from "jsonwebtoken";
+
+
+const login = asyncHandler(async (req, res) => {
+  const { email, password, rememberMe } = req.body;
+
+  if (!email || !password) {
+    throw new ApiError(400, "Email and password are required");
+  }
+
+  const normalizedData = {
+    email: email.trim().toLowerCase(),
+    password: password.trim(),
+    rememberMe:
+      rememberMe === true ||
+      rememberMe === "true" ||
+      rememberMe === 1 ||
+      rememberMe === "1" ||
+      rememberMe === "True",
+  };
+
+  const user = await User.scope("withSecrets").findOne({
+    where: { email: normalizedData.email },
+  });
+  if (!user) {
+    throw new ApiError(401, "Invalid credentials");
+  }
+
+  if (user.is_email_verified === false) {
+    throw new ApiError(403, "Email not verified");
+  }
+
+  const isPasswordCorrect = await bcrypt.compare(
+    normalizedData.password,
+    user.password_hash
+  );
+  if (!isPasswordCorrect) {
+    throw new ApiError(401, "Invalid credentials");
+  }
+
+  const accessToken = generateAccessToken(user);
+  const refreshToken = generateRefreshToken(user, normalizedData.rememberMe);
+
+  res.cookie("refreshToken", refreshToken, {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/api/v1/auth/refresh",
+    maxAge: normalizedData.rememberMe
+      ? ms(process.env.JWT_REMEMBER_ME_REFRESH_TOKEN_EXPIRY || "30d")
+      : ms(process.env.JWT_REFRESH_TOKEN_EXPIRY || "7d"),
+  });
+
+  // store hashed refresh token 
+  user.refresh_token = hashRefreshToken(refreshToken);
+  await user.save();
+
+  return res.status(200).json(
+    new ApiResponse(200, { accessToken }, "Login successful")
+  );
+});
+
+
+const logout = asyncHandler(async (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) {
+    throw new ApiError(401, "Unauthorized");
+  }
+
+  const user = await User.findByPk(userId);
+
+  if (user) {
+    user.refresh_token = null;
+    await user.save();
+  }
+
+  res.clearCookie("refreshToken", {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === "production",
+    sameSite: "lax",
+    path: "/api/v1/auth/refresh",
+  });
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, null, "Logged out successfully"));
+});
+
+
+const refresh = asyncHandler(async (req, res) => {
+  const refreshToken = req.cookies?.refreshToken;
+
+  if (!refreshToken) {
+    throw new ApiError(401, "Unauthorized");
+  }
+
+  let decoded;
+  try {
+    decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_TOKEN_SECRET);
+  } catch (error) {
+
+    console.log("JWT VERIFY ERROR:", error.name, error.message);
+    throw new ApiError(401, "Session expired. Please login again.");
+  }
+
+  const user = await User.scope("withSecrets").findByPk(decoded.id);
+  if (!user || !user.refresh_token) {
+    throw new ApiError(401, "Unauthorized");
+  }
+
+  const incomingHash = hashRefreshToken(refreshToken);
+  if (incomingHash !== user.refresh_token) {
+    throw new ApiError(401, "Unauthorized");
+  }
+
+  const accessToken = generateAccessToken(user);
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, { accessToken }, "Access token refreshed"));
+});
+
+
+const requestEmailVerification = asyncHandler(async (req, res) => {
+  const { email } = req.body;
+
+  if (!email || !validator.isEmail(email)) {
+    throw new ApiError(400, "Invalid email");
+  }
+
+  const normalizedEmail = email.toLowerCase();
+
+
+  const existing = await EmailVerification.findOne({
+    where: { email: normalizedEmail },
+  });
+
+  if (existing) {
+    if (existing.verified) {
+      return res
+        .status(200)
+        .json(new ApiResponse(200, null, "Email already verified"));
+    }
+
+    if (existing.expires_at && existing.expires_at < new Date()) {
+      await existing.destroy();
+    }
+  }
+
+  const otp = generateOTP();
+
+
+  await EmailVerification.upsert({
+    email: normalizedEmail,
+    otp,
+    verified: false,
+    expires_at: new Date(
+      Date.now() + Number(process.env.OTP_EXPIRY || "10") * 60 * 1000
+    ),
+  });
+
+  try {
+    await sendMail({
+      to: normalizedEmail,
+      subject: `${process.env.APP_NAME} - Email Verification OTP`,
+      html: otpTemplate(otp),
+      text: `Your OTP is: ${otp}`,
+    });
+  } catch (mailErr) {
+    console.error("Failed to send verification email:", mailErr);
+  }
+
+  return res
+    .status(201)
+    .json(new ApiResponse(201, null, "Verification OTP sent"));
+});
+
+
+const confirmEmailVerification = asyncHandler(async (req, res) => {
+  const { email, otp } = req.body;
+
+  if (!email || !otp) {
+    throw new ApiError(400, "Email and OTP are required");
+  }
+
+  if (!validator.isEmail(email)) {
+    throw new ApiError(400, "Invalid email");
+  }
+
+  const normalizedEmail = email.toLowerCase();
+
+  const record = await EmailVerification.findOne({
+    where: { email: normalizedEmail },
+  });
+
+  if (!record) {
+    throw new ApiError(400, "No verification request found");
+  }
+
+  if (record.verified) {
+    return res
+      .status(200)
+      .json(new ApiResponse(200, null, "Email already verified"));
+  }
+
+  if (record.expires_at && record.expires_at < new Date()) {
+    await record.destroy();
+    throw new ApiError(400, "OTP expired");
+  }
+
+  // normalize types and compare
+  if (String(record.otp) !== String(otp)) {
+    throw new ApiError(400, "Invalid OTP");
+  }
+
+  record.verified = true;
+  record.otp = null;
+  await record.save();
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, null, "Email verified successfully"));
+});
+
+
+const resetPassword = asyncHandler(async (req, res) => {
+  const { email, newPassword } = req.body;
+
+  if (!email || !newPassword) {
+    throw new ApiError(400, "Email and new password are required");
+  }
+
+  if (
+    !validator.isStrongPassword(newPassword, {
+      minLength: 8,
+      minLowercase: 1,
+      minUppercase: 1,
+      minNumbers: 1,
+      minSymbols: 1,
+    })
+  ) {
+    throw new ApiError(400, "Weak password");
+  }
+
+  const normalizedEmail = email.toLowerCase();
+
+  const record = await EmailVerification.findOne({
+    where: { email: normalizedEmail },
+  });
+
+  if (!record || !record.verified) {
+    throw new ApiError(400, "Email not verified or request expired");
+  }
+
+  const user = await User.scope("withSecrets").findOne({
+    where: { email: normalizedEmail },
+  });
+
+  if (!user) {
+    throw new ApiError(404, "User not found");
+  }
+
+  user.password_hash = await bcrypt.hash(newPassword, 10);
+  await user.save();
+
+  await record.destroy();
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, null, "Password reset successfully"));
+});
+
+
+export {
+  login,
+  logout,
+  refresh,
+  requestEmailVerification,
+  confirmEmailVerification,
+  resetPassword,
+};
+</file>
+
+<file path="backend/src/controllers/user.controller.js">
+import { config } from "dotenv";
+config();
+
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { ApiError } from "../utils/ApiError.js";
+import { ApiResponse } from "../utils/ApiResponse.js";
+import validator from "validator";
+import { hash } from "bcrypt";
+import { User } from "../models/user.model.js";
+import { EmailVerification } from "../models/email-verification.model.js";
+import { Op } from "sequelize";
+import { uploadAvatar, deleteAvatar, getProfilePhotoUrl } from "../utils/user.util.js";
+
+const createUser = asyncHandler(async (req, res) => {
+  const { fullName, username, email, password, phoneNumber } = req.body;
+
+  if (!fullName || !username || !email || !password || !phoneNumber) {
+    throw new ApiError(400, "All fields are required");
+  }
+
+  const normalizedData = {
+    fullName: fullName.trim(),
+    username: username.trim(),
+    email: email.trim().toLowerCase(),
+    password,
+    phoneNumber: String(phoneNumber).trim(),
+  };
+
+  // email must be verified first
+  const verification = await EmailVerification.findOne({
+    where: { email: normalizedData.email },
+  });
+
+  if (!verification || !verification.verified) {
+    throw new ApiError(403, "Email not verified, cannot proceed");
+  }
+
+  // validations
+  if (!validator.isEmail(normalizedData.email)) {
+    throw new ApiError(400, "Invalid email format");
+  }
+
+  if (!validator.isNumeric(normalizedData.phoneNumber) || normalizedData.phoneNumber.length !== 10) {
+    throw new ApiError(400, "Invalid phone number");
+  }
+
+  if (
+    !validator.isStrongPassword(normalizedData.password, {
+      minLength: 8,
+      minLowercase: 1,
+      minUppercase: 1,
+      minNumbers: 1,
+      minSymbols: 1,
+    })
+  ) {
+    throw new ApiError(400, "Weak password");
+  }
+
+  if (normalizedData.fullName.length < 2) {
+    throw new ApiError(400, "Invalid full name");
+  }
+
+  if (normalizedData.username.length < 3) {
+    throw new ApiError(400, "Invalid username");
+  }
+
+  // check existing user
+  const existingUser = await User.findOne({
+    where: {
+      [Op.or]: [
+        { email: normalizedData.email },
+        { phone_number: normalizedData.phoneNumber },
+      ],
+    },
+  });
+
+  if (existingUser) {
+    if (existingUser.username === normalizedData.username) {
+      throw new ApiError(409, "Username already taken");
+    }
+    if (existingUser.email === normalizedData.email) {
+      throw new ApiError(409, "Email already in use");
+    }
+    if (existingUser.phone_number === normalizedData.phoneNumber) {
+      throw new ApiError(409, "Phone number already in use");
+    }
+  }
+
+  const password_hash = await hash(normalizedData.password, 10);
+
+  let user;
+  try {
+    user = await User.create({
+      full_name: normalizedData.fullName,
+      username: normalizedData.username,
+      email: normalizedData.email,
+      password_hash,
+      phone_number: normalizedData.phoneNumber,
+      avatar_key: process.env.DEFAULT_AVATAR_KEY,
+      is_email_verified: true,
+    });
+  } catch (err) {
+    if (err.name === "SequelizeUniqueConstraintError") {
+      throw new ApiError(409, "User already exists");
+    }
+    throw err;
+  }
+
+  // consume verification record
+  await EmailVerification.destroy({
+    where: { email: normalizedData.email },
+  });
+
+  return res
+    .status(201)
+    .json(new ApiResponse(201, user, "User created successfully"));
+});
+
+
+
+const updateUser = asyncHandler(async (req, res) => {
+  const userId = req.user?.id;
+  if (!userId) throw new ApiError(401, "Unauthorized");
+
+  const { username, phoneNumber, password } = req.body;
+  const avatarPath = req.file?.path;
+
+  const updateData = {};
+
+  if (username !== undefined) {
+    if (typeof username !== "string") {
+      throw new ApiError(400, "Invalid username");
+    }
+
+    const value = username.trim();
+    if (value.length < 3) {
+      throw new ApiError(400, "Invalid username");
+    }
+
+    updateData.username = value;
+  }
+
+  if (phoneNumber !== undefined) {
+    const value = String(phoneNumber).trim();
+
+    if (!validator.isNumeric(value) || value.length !== 10) {
+      throw new ApiError(400, "Invalid phone number");
+    }
+
+    updateData.phone_number = value;
+  }
+
+  if (password !== undefined) {
+    if (
+      !validator.isStrongPassword(password, {
+        minLength: 8,
+        minLowercase: 1,
+        minUppercase: 1,
+        minNumbers: 1,
+        minSymbols: 1,
+      })
+    ) {
+      throw new ApiError(400, "Weak password");
+    }
+
+    updateData.password_hash = await hash(password, 10);
+  }
+
+  if (!Object.keys(updateData).length && !avatarPath) {
+    throw new ApiError(400, "No valid fields to update");
+  }
+
+  const user = await User.findByPk(userId);
+  if (!user) throw new ApiError(404, "User not found");
+
+  if (updateData.username) {
+    const exists = await User.findOne({
+      where: {
+        username: updateData.username,
+        id: { [Op.ne]: userId },
+      },
+    });
+    if (exists) throw new ApiError(409, "Username already in use");
+  }
+
+  if (updateData.phone_number) {
+    const exists = await User.findOne({
+      where: {
+        phone_number: updateData.phone_number,
+        id: { [Op.ne]: userId },
+      },
+    });
+    if (exists) throw new ApiError(409, "Phone number already in use");
+  }
+
+  if (avatarPath) {
+    try {
+      const { key } = await uploadAvatar(avatarPath);
+
+      if (
+        user.avatar_key &&
+        user.avatar_key !== process.env.DEFAULT_AVATAR_KEY
+      ) {
+        await deleteAvatar(user.avatar_key);
+      }
+
+      updateData.avatar_key = key;
+    } catch (err) {
+      console.error("Avatar update failed:", err);
+      throw new ApiError(500, "Avatar update failed");
+    }
+  }
+
+  user.set(updateData);
+  await user.save();
+
+  return res.status(200).json(
+    new ApiResponse(200, user, "Profile updated successfully")
+  );
+});
+
+
+const deleteUser = asyncHandler(async (req, res) => {
+  // for future case
+
+});
+
+
+const me = asyncHandler(async (req, res) => {
+  const user = await User.findByPk(req?.user?.id);
+
+  if (!user) {
+    throw new ApiError(401, "Unauthorized");
+  }
+
+  const avatar_url = await getProfilePhotoUrl(user?.avatar_key);
+
+  return res.status(200).json(
+    new ApiResponse(200, { user, avatar_url }, "User fetched successfully")
+  );
+});
+
+export {
+  createUser,
+  updateUser,
+  deleteUser,
+  me
+};
+</file>
+
+<file path="backend/src/middlewares/errorHandler.middleware.js">
+export const errorHandler = (err, req, res, next) => {
+  const statusCode = err.statusCode || 500;
+
+  res.status(statusCode).json({
+    success: false,
+    message: err.message || 'Internal Server Error',
+  });
+
+
+  console.error('Error:', err);
+};
+</file>
+
+<file path="backend/src/middlewares/multer.middleware.js">
+import multer from "multer";
+import path from "node:path";
+import fs from "fs";
+import { randomUUID } from "crypto";
+
+const uploadDir = path.resolve("public/temp");
+if (!fs.existsSync(uploadDir)) {
+  fs.mkdirSync(uploadDir, { recursive: true });
+}
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => cb(null, uploadDir),
+  filename: (req, file, cb) => {
+
+    const original = path.basename(file.originalname || "file");
+    const ext = path.extname(original).toLowerCase();
+    const name = `${Date.now()}-${randomUUID()}${ext}`;
+    cb(null, name);
+  },
+});
+
+const uploadAvatarImage = multer({
+  storage,
+  limits: { fileSize: 16 * 1024 * 1024 }, // 16MB
+  fileFilter: (req, file, cb) => {
+
+    const allowed = [
+      "image/jpeg",
+      "image/png",
+      "image/webp",
+      "image/svg+xml",
+    ];
+
+    if (allowed.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error("Only JPG, PNG, WEBP, SVG files are allowed"));
+    }
+  },
+});
+
+const parseFormDataOnly = multer().none();
+
+export { uploadAvatarImage, parseFormDataOnly };
+</file>
+
+<file path="backend/src/models/email-verification.model.js">
+import { DataTypes } from "sequelize";
+import { sequelize } from "../configs/db/index.js";
+
+const EmailVerification = sequelize.define(
+  "EmailVerification",
+  {
+    id: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      autoIncrement: true,
+      primaryKey: true,
+    },
+
+    email: {
+      type: DataTypes.STRING(255),
+      allowNull: false,
+      unique: true,
+      validate: { isEmail: true },
+    },
+
+    otp: {
+      type: DataTypes.STRING(10),
+      allowNull: true,
+      comment: "OTP or verification code",
+    },
+
+    verified: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false,
+    },
+
+    expires_at: {
+      type: DataTypes.DATE,
+      allowNull: false,
+    },
+  },
+  {
+    tableName: "email_verifications",
+    timestamps: true,
+    createdAt: "created_at",
+    updatedAt: false,
+
+    indexes: [{ fields: ["email"] }],
+  }
+);
+
+export { EmailVerification };
+</file>
+
+<file path="backend/src/routes/user.route.js">
+import { Router } from 'express';
+import { createUser, me, updateUser } from '../controllers/user.controller.js';
+import { isAuthenticated } from '../middlewares/auth.middleware.js';
+import { uploadAvatarImage } from '../middlewares/multer.middleware.js';
+
+const userRouter = Router();
+
+
+
+userRouter.post('/create', createUser);
+
+userRouter.post('/update', isAuthenticated, uploadAvatarImage.single('avatar'), updateUser);
+
+userRouter.get('/me', isAuthenticated, me);
+
+export { userRouter };
+</file>
+
+<file path="backend/src/utils/ApiError.js">
+class ApiError extends Error {
+
+
+    constructor(
+        statusCode,
+        message = "Some thing went wrong",
+        errors = [],
+        stack = ""
+    ) {
+        super(message);
+        this.statusCode = statusCode;
+        this.message = message;
+        this.errors = errors;
+        this.success = false;
+        this.data = null;
+
+        if (stack) { this.stack = stack; }
+        else {
+            Error.captureStackTrace(this, this.constructor)
+
+        }
+    }
+
+}
+
+export { ApiError };
+</file>
+
+<file path="backend/src/utils/ApiResponse.js">
+class ApiResponse {
+
+    constructor(
+        statusCode,
+        data,
+        message = "Success"
+    ) {
+        this.statusCode = statusCode;
+        this.data = data;
+        this.message = message;
+        this.success = statusCode < 400;
+    }
+}
+
+export { ApiResponse };
+</file>
+
+<file path="backend/src/utils/asyncHandler.js">
+const asyncHandler = (fn) => {
+    return async (req, res, next) => {
+        try {
+            await fn(req, res, next);
+        } catch (error) {
+            next(error);
+        }
+    }
+}
+
+export { asyncHandler };
+</file>
+
+<file path="backend/src/utils/auth.util.js">
+import { config } from 'dotenv';
+config();
+import jwt from 'jsonwebtoken';
+import ms from 'ms';
+import crypto from 'crypto';
+
+
+const generateOTP = () => {
+  return Math.floor(100000 + Math.random() * 900000).toString();
+}
+
+const hashRefreshToken = (token) =>
+  crypto.createHash("sha256").update(token).digest("hex");
+
+
+const generateAccessToken = (user) => {
+  const accessTokenExpiry = process.env.JWT_ACCESS_TOKEN_EXPIRY || "15m";
+  const accessToken = jwt.sign(
+    {
+      id: user.id,
+      email: user.email,
+      fullName: user.full_name,
+    },
+    process.env.JWT_ACCESS_TOKEN_SECRET,
+    { expiresIn: accessTokenExpiry }
+  );
+  return accessToken;
+}
+
+
+const generateRefreshToken = (user, rememberMe) => {
+  const refreshTokenExpiry = rememberMe
+    ? process.env.JWT_REMEMBER_ME_REFRESH_TOKEN_EXPIRY || "30d"
+    : process.env.JWT_REFRESH_TOKEN_EXPIRY || "7d";
+
+  const refreshToken = jwt.sign(
+    { id: user.id },
+    process.env.JWT_REFRESH_TOKEN_SECRET,
+    { expiresIn: refreshTokenExpiry }
+  );
+
+  return refreshToken;
+}
+
+
+export {
+  generateOTP,
+  generateAccessToken,
+  generateRefreshToken,
+  hashRefreshToken
+};
+</file>
+
+<file path="backend/src/utils/user.util.js">
+import { config } from 'dotenv';
+config();
+import { GetObjectCommand, PutObjectCommand, HeadObjectCommand, DeleteObjectCommand } from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
+import { s3 } from "../configs/S3/index.js";
+import { randomUUID } from 'node:crypto';
+import fs from 'fs';
+import path from 'path';
+
+
+const getProfilePhotoUrl = async (avatarKey) => {
+  const key = avatarKey || process.env.DEFAULT_AVATAR_KEY;
+  console.log(key);
+  const command = new GetObjectCommand({
+    Bucket: process.env.AWS_S3_BUCKET,
+    Key: key
+  });
+
+  return await getSignedUrl(s3, command, {
+    expiresIn: 60 * 60
+  });
+}
+
+
+const uploadAvatar = async (localFilePath) => {
+  if (!localFilePath || typeof localFilePath !== "string") {
+    throw new Error("Invalid avatar file path");
+  }
+
+  const safePath = localFilePath.trim();
+
+
+  if (!fs.existsSync(safePath)) {
+    throw new Error("Avatar file does not exist on disk");
+  }
+
+
+  const allowedExt = [".jpg", ".jpeg", ".png", ".webp", ".svg"];
+  const fileExt = path.extname(safePath).toLowerCase();
+
+  if (!allowedExt.includes(fileExt)) {
+    fs.unlinkSync(safePath); // cleanup
+    throw new Error("Unsupported image format");
+  }
+
+  const s3Key = `avatars/${randomUUID()}${fileExt}`;
+
+  let fileStream;
+
+  try {
+    fileStream = fs.createReadStream(safePath);
+
+    const command = new PutObjectCommand({
+      Bucket: process.env.AWS_S3_BUCKET,
+      Key: s3Key,
+      Body: fileStream,
+      ContentType: `image/${fileExt.replace(".", "")}`,
+    });
+
+    await s3.send(command);
+
+    return { key: s3Key };
+  } catch (error) {
+    console.error("S3 avatar upload failed:", error);
+    throw new Error("Failed to upload avatar");
+  } finally {
+
+    try {
+      fs.unlinkSync(safePath);
+    } catch (error) {
+      throw new Error("Failed to clean local file..");
+    }
+  }
+};
+
+
+
+
+const deleteAvatar = async (avatarKey) => {
+
+  if (!avatarKey || typeof avatarKey !== "string") {
+    return;
+  }
+
+  const safeKey = avatarKey.trim();
+
+
+  if (safeKey === process.env.DEFAULT_AVATAR_KEY) {
+    return;
+  }
+
+  try {
+
+    await s3.send(
+      new HeadObjectCommand({
+        Bucket: process.env.AWS_S3_BUCKET,
+        Key: safeKey,
+      })
+    );
+
+
+    await s3.send(
+      new DeleteObjectCommand({
+        Bucket: process.env.AWS_S3_BUCKET,
+        Key: safeKey,
+      })
+    );
+  } catch (error) {
+
+    if (error?.$metadata?.httpStatusCode === 404) {
+      return;
+    }
+
+    console.error("S3 avatar deletion failed:", {
+      key: safeKey,
+      error,
+    });
+
+    throw new Error("Failed to delete avatar");
+  }
+};
+
+
+
+
+
+export {
+  getProfilePhotoUrl,
+  uploadAvatar,
+  deleteAvatar
+};
+</file>
+
+<file path=".gitignore">
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Diagnostic reports (https://nodejs.org/api/report.html)
+report.[0-9]*.[0-9]*.[0-9]*.[0-9]*.json
+
+# Runtime data
+pids
+*.pid
+*.seed
+*.pid.lock
+
+# Directory for instrumented libs generated by jscoverage/JSCover
+lib-cov
+
+# Coverage directory used by tools like istanbul
+coverage
+*.lcov
+
+# nyc test coverage
+.nyc_output
+
+# Grunt intermediate storage (https://gruntjs.com/creating-plugins#storing-task-files)
+.grunt
+
+# Bower dependency directory (https://bower.io/)
+bower_components
+
+# node-waf configuration
+.lock-wscript
+
+# Compiled binary addons (https://nodejs.org/api/addons.html)
+build/Release
+
+# Dependency directories
+node_modules/
+jspm_packages/
+
+# Snowpack dependency directory (https://snowpack.dev/)
+web_modules/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# Optional npm cache directory
+.npm
+
+# Optional eslint cache
+.eslintcache
+
+# Optional stylelint cache
+.stylelintcache
+
+# Optional REPL history
+.node_repl_history
+
+# Output of 'npm pack'
+*.tgz
+
+# Yarn Integrity file
+.yarn-integrity
+
+# dotenv environment variable files
+.env
+.env.*
+!.env.example
+
+# parcel-bundler cache (https://parceljs.org/)
+.cache
+.parcel-cache
+
+# Next.js build output
+.next
+out
+
+# Nuxt.js build / generate output
+.nuxt
+dist
+
+# Gatsby files
+.cache/
+# Comment in the public line in if your project uses Gatsby and not Next.js
+# https://nextjs.org/blog/next-9-1#public-directory-support
+# public
+
+# vuepress build output
+.vuepress/dist
+
+# vuepress v2.x temp and cache directory
+.temp
+.cache
+
+# Sveltekit cache directory
+.svelte-kit/
+
+# vitepress build output
+**/.vitepress/dist
+
+# vitepress cache directory
+**/.vitepress/cache
+
+# Docusaurus cache and generated files
+.docusaurus
+
+# Serverless directories
+.serverless/
+
+# FuseBox cache
+.fusebox/
+
+# DynamoDB Local files
+.dynamodb/
+
+# Firebase cache directory
+.firebase/
+
+# TernJS port file
+.tern-port
+
+# Stores VSCode versions used for testing VSCode extensions
+.vscode-test
+
+# yarn v3
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/sdks
+!.yarn/versions
+
+# Vite logs files
+vite.config.js.timestamp-*
+vite.config.ts.timestamp-*
+</file>
+
+<file path="README.md">
+# Kodebox
+</file>
+
+<file path="backend/src/configs/db/index.js">
+import {config} from 'dotenv';
+config();
+import { Sequelize } from "sequelize";
+import mysql2 from "mysql2";
+
+const sequelize = new Sequelize(
+  process.env.DB_NAME,
+  process.env.DB_USER,
+  process.env.DB_PASSWORD,
+  {
+    host: process.env.DB_HOST,
+    port: process.env.DB_PORT,
+    dialect: "mysql",
+    dialectModule: mysql2, 
+    logging: false,
+  }
+);
+
+const connectDB = async () => {
+  try {
+    await sequelize.authenticate();
+    console.log(`\nMySQL connected at host : ${process.env.DB_HOST}\n`);
+  } catch (error) {
+    console.error("MySQL connection failed", error);
+    process.exit(1);
+  }
+};
+
+export { sequelize, connectDB };
+</file>
+
+<file path="backend/src/middlewares/auth.middleware.js">
+import { config } from "dotenv";
+config();
+
+import jwt from "jsonwebtoken";
+import { ApiError } from "../utils/ApiError.js";
+import { asyncHandler } from "../utils/asyncHandler.js";
+import { User } from "../models/user.model.js";
+
+const isAuthenticated = asyncHandler(async (req, res, next) => {
+    const authHeader = req.headers?.authorization;
+
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        throw new ApiError(401, "Unauthorized: No token provided");
+    }
+
+    const token = authHeader.slice(7).trim();
+
+    if (!process.env.JWT_ACCESS_TOKEN_SECRET) {
+        throw new ApiError(
+            500,
+            "Server misconfiguration: JWT secret missing"
+        );
+    }
+
+    let decoded;
+    try {
+        decoded = jwt.verify(token, process.env.JWT_ACCESS_TOKEN_SECRET);
+    } catch (error) {
+        const msg =
+            error.name === "TokenExpiredError"
+                ? "Session expired. Refresh and get new token."
+                : "Invalid or tampered token.";
+        throw new ApiError(401, msg);
+    }
+
+    if (!decoded?.id) {
+        throw new ApiError(401, "Unauthorized: Token payload is invalid");
+    }
+
+    const user = await User.findByPk(decoded.id);
+
+    if (!user) {
+        throw new ApiError(401, "Unauthorized: User no longer exists");
+    }
+
+    req.user = user;
+    next();
+});
+
+// future scope admin panel
+const isAuthorised = () =>
+    asyncHandler(async (req, res, next) => {
+        next();
+    });
+
+export {
+    isAuthenticated,
+    isAuthorised,
+};
+</file>
+
+<file path="backend/src/models/index.js">
+import { User } from "./user.model.js";
+import { Plan } from "./plan.model.js";
+import { Subscription } from "./subscription.model.js";
+import { Instance } from "./instance.model.js";
+import { Volume } from "./volume.model.js";
+import { Backup } from "./backup.model.js";
+import { Payment } from "./payment.model.js";
+import { EmailVerification } from "./email-verification.model.js";
+
+console.log("Initializing Database Associations...");
+
+
+Plan.hasMany(Subscription, { foreignKey: "plan_id" });
+Subscription.belongsTo(Plan, { foreignKey: "plan_id", as: "Plan" });
+
+
+Plan.hasMany(User, { foreignKey: "plan_id" });
+User.belongsTo(Plan, { foreignKey: "plan_id" });
+
+
+User.hasMany(Subscription, { foreignKey: "user_id" });
+Subscription.belongsTo(User, { foreignKey: "user_id" });
+
+
+Subscription.hasMany(Payment, { foreignKey: "subscription_id" });
+Payment.belongsTo(Subscription, { foreignKey: "subscription_id" });
+
+
+User.hasOne(Instance, { foreignKey: "user_id" });
+Instance.belongsTo(User, { foreignKey: "user_id" });
+
+
+Instance.hasOne(Volume, { foreignKey: "instance_id" });
+Volume.belongsTo(Instance, { foreignKey: "instance_id" });
+
+
+Instance.hasMany(Backup, { foreignKey: "instance_id" });
+Backup.belongsTo(Instance, { foreignKey: "instance_id" });
+
+
+Volume.hasMany(Backup, { foreignKey: "volume_id" });
+Backup.belongsTo(Volume, { foreignKey: "volume_id" });
+
+export {
+  User,
+  Plan,
+  Subscription,
+  Instance,
+  Volume,
+  Backup,
+  Payment,
+  EmailVerification
+};
+</file>
+
+<file path="backend/src/routes/auth.route.js">
+import { Router } from "express";
+import {
+  confirmEmailVerification,
+  login,
+  logout,
+  refresh,
+  requestEmailVerification,
+  resetPassword
+} from "../controllers/auth.controller.js";
+import { isAuthenticated } from "../middlewares/auth.middleware.js";
+
+const authRouter = Router();
+
+authRouter.post('/login', login);
+
+authRouter.post('/logout', isAuthenticated, logout);
+
+authRouter.post('/refresh', refresh);
+
+authRouter.post('/email/verification/request', requestEmailVerification);
+
+authRouter.post('/email/verification/confirm', confirmEmailVerification);
+
+authRouter.post('/reset-password', resetPassword);
+
+export { authRouter };
+</file>
+
+<file path="backend/src/models/user.model.js">
+import { DataTypes } from "sequelize";
+import { sequelize } from "../configs/db/index.js";
+
+const User = sequelize.define(
+  "User",
+  {
+    id: {
+      type: DataTypes.BIGINT.UNSIGNED,
+      autoIncrement: true,
+      primaryKey: true,
+    },
+
+    full_name: {
+      type: DataTypes.STRING(255),
+      allowNull: false,
+      validate: { len: [2, 255] },
+    },
+
+    username: {
+      type: DataTypes.STRING(255),
+      allowNull: false,
+      unique: true,
+      validate: {
+        len: [3, 255],
+        is: /^[a-zA-Z0-9_.]+$/i,
+      },
+    },
+
+    email: {
+      type: DataTypes.STRING(255),
+      allowNull: false,
+      unique: true,
+      validate: { isEmail: true },
+    },
+
+    password_hash: {
+      type: DataTypes.STRING(255),
+      allowNull: false,
+    },
+
+    avatar_key: {
+      type: DataTypes.STRING(255),
+      allowNull: true,
+    },
+
+    role: {
+      type: DataTypes.ENUM("admin", "user"),
+      defaultValue: "user",
+    },
+
+    phone_number: {
+      type: DataTypes.STRING(20),
+      allowNull: false,
+    },
+
+    is_email_verified: {
+      type: DataTypes.BOOLEAN,
+      defaultValue: false,
+    },
+
+    refresh_token: {
+      type: DataTypes.STRING(512),
+      allowNull: true,
+    },
+
+    razorpay_customer_id: {
+      type: DataTypes.STRING(100),
+      allowNull: true,
+    },
+
+    plan_id: {
+      type: DataTypes.BIGINT.UNSIGNED, 
+      defaultValue: 1,
+      allowNull: false,
+    }
+
+  },
+  {
+    tableName: "users",
+    timestamps: true,
+    createdAt: "created_at",
+    updatedAt: "updated_at",
+
+    indexes: [
+      { fields: ["email"] },
+      { fields: ["username"] },
+      { fields: ["phone_number"] },
+    ],
+
+    defaultScope: {
+      attributes: {
+        exclude: ["password_hash", "refresh_token"],
+      },
+    },
+
+    scopes: {
+      withSecrets: {
+        attributes: {
+          include: ["password_hash", "refresh_token"],
+        },
+      },
+    },
+  }
+);
+
+export { User };
+</file>
+
+<file path="backend/src/app.js">
+import express from 'express';
+import { config } from 'dotenv';
+config();
+import cors from 'cors';
+import cookieParser from 'cookie-parser';
+import { fileURLToPath } from 'url';
+import path from 'path';
+
+import { userRouter } from './routes/user.route.js';
+import { authRouter } from './routes/auth.route.js';
+import { planRouter } from './routes/plan.route.js';
+import { instanceRouter } from './routes/instance.route.js';
+import { subscriptionRouter } from './routes/subscription.route.js';
+import { razorpayWebhookRouter } from './routes/webhook.route.js';
+import { backupRouter } from './routes/backup.route.js';
+import { errorHandler } from './middlewares/errorHandler.middleware.js';
+
+const app = express();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+app.use(
+  '/api/v1/webhooks/razorpay',
+  express.raw({ type: 'application/json' })
+);
+
+app.use(cors({
+  origin: process.env.CLIENT_URL || "http://localhost:5173",
+  credentials: true
+}));
+
+app.use(cookieParser());
+
+app.use((req, res, next) => {
+  if (req.path === '/api/v1/webhooks/razorpay') {
+    next();
+  } else {
+    express.json({ limit: '10mb' })(req, res, next);
+  }
+});
+
+app.use(express.urlencoded({ limit: '10mb', extended: true }));
+app.use(express.static('public'));
+app.use('/uploads', express.static(path.join(__dirname, '../public/uploads')));
+
+app.get('/', (req, res) => {
+  res.send("Hello from Kodebox API!");
+});
+
+app.use('/api/v1/user', userRouter);
+app.use('/api/v1/auth', authRouter);
+app.use('/api/v1/plans', planRouter);
+app.use('/api/v1/instance', instanceRouter);
+app.use('/api/v1/subscription', subscriptionRouter);
+app.use('/api/v1/webhooks', razorpayWebhookRouter);
+app.use('/api/v1/backups', backupRouter);
+
+app.use((req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'Route not found',
+  });
+});
+
+app.use(errorHandler);
+
+export { app };
+</file>
+
+<file path="backend/src/index.js">
+import http from "http";
+import { config } from "dotenv";
+config();
+
+import { app } from "./app.js";
+import { connectDB, sequelize } from "./configs/db/index.js";
+import { initTerminalSocket } from "../sockets/terminal.socket.js";
+
+
+import "./models/index.js";
+
+
+import { startBackupCron } from "../jobs/backup.cron.js";
+
+const PORT = process.env.PORT || 3000;
+
+(async () => {
+  try {
+
+    await connectDB();
+
+    // Sync Models (Development Mode)
+    // In production, use Migrations instead of sync({ alter: true })
+    if (process.env.NODE_ENV === "development") {
+      await sequelize.sync();
+      console.log("Database models synced");
+    }
+
+    startBackupCron();
+
+    const server = http.createServer(app);
+
+    initTerminalSocket(server);
+
+    server.listen(PORT, () => {
+      console.log(`\nServer running on port : ${PORT}`);
+      console.log(`Local URL : http://localhost:${PORT}`);
+    });
+
+  } catch (err) {
+    console.error("Startup failed:", err);
+    process.exit(1);
+  }
+})();
+</file>
+
+<file path="backend/package.json">
+{
+  "name": "kodebox",
+  "version": "1.0.0",
+  "description": "kodebox is a cloudide",
+  "homepage": "https://github.com/Pratham2779/Kodebox#readme",
+  "bugs": {
+    "url": "https://github.com/Pratham2779/Kodebox/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Pratham2779/Kodebox.git"
+  },
+  "license": "ISC",
+  "author": "Prathamesh Arun Gurav",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "nodemon src/index.js"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.11"
+  },
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.958.0",
+    "@aws-sdk/lib-storage": "^3.967.0",
+    "@aws-sdk/s3-request-presigner": "^3.958.0",
+    "axios": "^1.13.4",
+    "bcrypt": "^6.0.0",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dockerode": "^4.0.9",
+    "dotenv": "^17.2.3",
+    "express": "^5.2.1",
+    "jsonwebtoken": "^9.0.3",
+    "ms": "^2.1.3",
+    "multer": "^2.0.2",
+    "mysql2": "^3.16.0",
+    "node-cron": "^4.2.1",
+    "node-pty": "^1.1.0",
+    "nodemailer": "^7.0.12",
+    "path": "^0.12.7",
+    "razorpay": "^2.9.6",
+    "sequelize": "^6.37.7",
+    "socket.io": "^4.8.3",
+    "tar": "^7.5.7",
+    "validator": "^13.15.26",
+    "ws": "^8.19.0"
+  }
+}
+</file>
+
+</files>

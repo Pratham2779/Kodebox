@@ -6,6 +6,6 @@ export const errorHandler = (err, req, res, next) => {
     message: err.message || 'Internal Server Error',
   });
 
-  // Optional: log for debugging
+
   console.error('Error:', err);
 };

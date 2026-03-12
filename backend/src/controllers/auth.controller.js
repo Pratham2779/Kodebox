@@ -117,7 +117,7 @@ const refresh = asyncHandler(async (req, res) => {
   try {
     decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_TOKEN_SECRET);
   } catch (error) {
-    // log briefly for debugging 
+
     console.log("JWT VERIFY ERROR:", error.name, error.message);
     throw new ApiError(401, "Session expired. Please login again.");
   }
@@ -149,7 +149,7 @@ const requestEmailVerification = asyncHandler(async (req, res) => {
 
   const normalizedEmail = email.toLowerCase();
 
-  // remove expired existing record if present
+
   const existing = await EmailVerification.findOne({
     where: { email: normalizedEmail },
   });
@@ -168,7 +168,7 @@ const requestEmailVerification = asyncHandler(async (req, res) => {
 
   const otp = generateOTP();
 
-  // upsert the verification record 
+
   await EmailVerification.upsert({
     email: normalizedEmail,
     otp,
@@ -241,10 +241,60 @@ const confirmEmailVerification = asyncHandler(async (req, res) => {
     .json(new ApiResponse(200, null, "Email verified successfully"));
 });
 
+
+const resetPassword = asyncHandler(async (req, res) => {
+  const { email, newPassword } = req.body;
+
+  if (!email || !newPassword) {
+    throw new ApiError(400, "Email and new password are required");
+  }
+
+  if (
+    !validator.isStrongPassword(newPassword, {
+      minLength: 8,
+      minLowercase: 1,
+      minUppercase: 1,
+      minNumbers: 1,
+      minSymbols: 1,
+    })
+  ) {
+    throw new ApiError(400, "Weak password");
+  }
+
+  const normalizedEmail = email.toLowerCase();
+
+  const record = await EmailVerification.findOne({
+    where: { email: normalizedEmail },
+  });
+
+  if (!record || !record.verified) {
+    throw new ApiError(400, "Email not verified or request expired");
+  }
+
+  const user = await User.scope("withSecrets").findOne({
+    where: { email: normalizedEmail },
+  });
+
+  if (!user) {
+    throw new ApiError(404, "User not found");
+  }
+
+  user.password_hash = await bcrypt.hash(newPassword, 10);
+  await user.save();
+
+  await record.destroy();
+
+  return res
+    .status(200)
+    .json(new ApiResponse(200, null, "Password reset successfully"));
+});
+
+
 export {
   login,
   logout,
   refresh,
   requestEmailVerification,
   confirmEmailVerification,
+  resetPassword,
 };

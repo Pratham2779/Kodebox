@@ -1,29 +1,44 @@
+import http from "http";
 import { config } from "dotenv";
-config({ path: ".env" });
+config();
 
 import { app } from "./app.js";
 import { connectDB, sequelize } from "./configs/db/index.js";
+import { initTerminalSocket } from "../sockets/terminal.socket.js";
+
+
 import "./models/index.js";
 
-const PORT = process.env.PORT;
 
-;(async () => {
+import { startBackupCron } from "../jobs/backup.cron.js";
+
+const PORT = process.env.PORT || 3000;
+
+(async () => {
   try {
 
     await connectDB();
 
-    
+    // Sync Models (Development Mode)
+    // In production, use Migrations instead of sync({ alter: true })
     if (process.env.NODE_ENV === "development") {
-      await sequelize.sync({force:true});
-      console.log("Models synced (development only)");
+      await sequelize.sync();
+      console.log("Database models synced");
     }
 
-    
-    app.listen(PORT, () => {
-      console.log(`Server running on port : ${PORT}`);
-      console.log(`Server URL : http://localhost:${PORT}`);
+    startBackupCron();
+
+    const server = http.createServer(app);
+
+    initTerminalSocket(server);
+
+    server.listen(PORT, () => {
+      console.log(`\nServer running on port : ${PORT}`);
+      console.log(`Local URL : http://localhost:${PORT}`);
     });
-  } catch (error) {
-    console.error("Startup failed", error);
+
+  } catch (err) {
+    console.error("Startup failed:", err);
+    process.exit(1);
   }
 })();

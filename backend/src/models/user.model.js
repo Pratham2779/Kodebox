@@ -58,15 +58,22 @@ const User = sequelize.define(
       defaultValue: false,
     },
 
+    refresh_token: {
+      type: DataTypes.STRING(512),
+      allowNull: true,
+    },
+
     razorpay_customer_id: {
       type: DataTypes.STRING(100),
       allowNull: true,
     },
 
-    refresh_token: {
-      type: DataTypes.STRING(512),
-      allowNull: true,
-    },
+    plan_id: {
+      type: DataTypes.BIGINT.UNSIGNED, 
+      defaultValue: 1,
+      allowNull: false,
+    }
+
   },
   {
     tableName: "users",

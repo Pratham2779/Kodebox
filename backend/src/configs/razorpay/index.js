@@ -1,3 +1,5 @@
+import {config} from 'dotenv';
+config();
 import Razorpay from "razorpay";
 
 export const razorpay = new Razorpay({

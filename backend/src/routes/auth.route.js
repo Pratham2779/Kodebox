@@ -1,21 +1,26 @@
 import { Router } from "express";
-import { confirmEmailVerification, login, logout, refresh, requestEmailVerification } from "../controllers/auth.controller.js";
+import {
+  confirmEmailVerification,
+  login,
+  logout,
+  refresh,
+  requestEmailVerification,
+  resetPassword
+} from "../controllers/auth.controller.js";
 import { isAuthenticated } from "../middlewares/auth.middleware.js";
 
-const authRouter=Router();
+const authRouter = Router();
 
+authRouter.post('/login', login);
 
-authRouter.post('/login',login);
+authRouter.post('/logout', isAuthenticated, logout);
 
-authRouter.post('/logout',isAuthenticated,logout);
+authRouter.post('/refresh', refresh);
 
-authRouter.post('/refresh',refresh);
+authRouter.post('/email/verification/request', requestEmailVerification);
 
-authRouter.post('/email/verification/request',requestEmailVerification);
+authRouter.post('/email/verification/confirm', confirmEmailVerification);
 
-authRouter.post('/email/verification/confirm',confirmEmailVerification);
+authRouter.post('/reset-password', resetPassword);
 
-
-
-
-export {authRouter};
+export { authRouter };

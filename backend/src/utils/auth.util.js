@@ -1,4 +1,4 @@
-import { config} from 'dotenv';
+import { config } from 'dotenv';
 config();
 import jwt from 'jsonwebtoken';
 import ms from 'ms';
@@ -13,9 +13,9 @@ const hashRefreshToken = (token) =>
   crypto.createHash("sha256").update(token).digest("hex");
 
 
-const generateAccessToken = (user)=>{
+const generateAccessToken = (user) => {
   const accessTokenExpiry = process.env.JWT_ACCESS_TOKEN_EXPIRY || "15m";
-   const accessToken = jwt.sign(
+  const accessToken = jwt.sign(
     {
       id: user.id,
       email: user.email,
@@ -28,24 +28,24 @@ const generateAccessToken = (user)=>{
 }
 
 
-const generateRefreshToken = (user,rememberMe)=>{
-    const refreshTokenExpiry = rememberMe
+const generateRefreshToken = (user, rememberMe) => {
+  const refreshTokenExpiry = rememberMe
     ? process.env.JWT_REMEMBER_ME_REFRESH_TOKEN_EXPIRY || "30d"
     : process.env.JWT_REFRESH_TOKEN_EXPIRY || "7d";
 
-    const refreshToken = jwt.sign(
+  const refreshToken = jwt.sign(
     { id: user.id },
     process.env.JWT_REFRESH_TOKEN_SECRET,
     { expiresIn: refreshTokenExpiry }
-    );
+  );
 
-    return refreshToken;
+  return refreshToken;
 }
 
 
 export {
-    generateOTP,
-    generateAccessToken,
-    generateRefreshToken,
-    hashRefreshToken
+  generateOTP,
+  generateAccessToken,
+  generateRefreshToken,
+  hashRefreshToken
 };

@@ -9,7 +9,7 @@ import { hash } from "bcrypt";
 import { User } from "../models/user.model.js";
 import { EmailVerification } from "../models/email-verification.model.js";
 import { Op } from "sequelize";
-import { uploadAvatar,deleteAvatar } from "../utils/user.util.js";
+import { uploadAvatar, deleteAvatar, getProfilePhotoUrl } from "../utils/user.util.js";
 
 const createUser = asyncHandler(async (req, res) => {
   const { fullName, username, email, password, phoneNumber } = req.body;
@@ -40,7 +40,7 @@ const createUser = asyncHandler(async (req, res) => {
     throw new ApiError(400, "Invalid email format");
   }
 
-  if (!validator.isMobilePhone(normalizedData.phoneNumber, "any")) {
+  if (!validator.isNumeric(normalizedData.phoneNumber) || normalizedData.phoneNumber.length !== 10) {
     throw new ApiError(400, "Invalid phone number");
   }
 
@@ -75,6 +75,9 @@ const createUser = asyncHandler(async (req, res) => {
   });
 
   if (existingUser) {
+    if (existingUser.username === normalizedData.username) {
+      throw new ApiError(409, "Username already taken");
+    }
     if (existingUser.email === normalizedData.email) {
       throw new ApiError(409, "Email already in use");
     }
@@ -94,7 +97,7 @@ const createUser = asyncHandler(async (req, res) => {
       password_hash,
       phone_number: normalizedData.phoneNumber,
       avatar_key: process.env.DEFAULT_AVATAR_KEY,
-      is_email_verified: true, 
+      is_email_verified: true,
     });
   } catch (err) {
     if (err.name === "SequelizeUniqueConstraintError") {
@@ -140,7 +143,7 @@ const updateUser = asyncHandler(async (req, res) => {
   if (phoneNumber !== undefined) {
     const value = String(phoneNumber).trim();
 
-    if (!validator.isMobilePhone(value, "any")) {
+    if (!validator.isNumeric(value) || value.length !== 10) {
       throw new ApiError(400, "Invalid phone number");
     }
 
@@ -217,10 +220,11 @@ const updateUser = asyncHandler(async (req, res) => {
 });
 
 
-const deleteUser = asyncHandler( async (req,res)=>{
-
+const deleteUser = asyncHandler(async (req, res) => {
+  // for future case
 
 });
+
 
 const me = asyncHandler(async (req, res) => {
   const user = await User.findByPk(req?.user?.id);
@@ -229,14 +233,16 @@ const me = asyncHandler(async (req, res) => {
     throw new ApiError(401, "Unauthorized");
   }
 
+  const avatar_url = await getProfilePhotoUrl(user?.avatar_key);
+
   return res.status(200).json(
-    new ApiResponse(200, user, "User fetched successfully")
+    new ApiResponse(200, { user, avatar_url }, "User fetched successfully")
   );
 });
 
-export { 
+export {
   createUser,
   updateUser,
   deleteUser,
   me
- };
+};
