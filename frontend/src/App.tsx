@@ -1,4 +1,3 @@
-// src/App.tsx
 import { BrowserRouter as Router, Routes, Route } from "react-router-dom";
 import SignIn from "./pages/AuthPages/SignIn";
 import SignUp from "./pages/AuthPages/SignUp";
@@ -10,10 +9,11 @@ import { ScrollToTop } from "./components/common/ScrollToTop";
 import ForgotPassword from "./pages/AuthPages/ForgotPassword";
 import UiTerminal from "./pages/Dashboard/UiTerminal";
 import ProtectedRoute from "./components/ProtectedRoute";
-import BackupsAndRestore from "./pages/Dashboard/BackupsAndRestore.tsx";
-import UpgradePlan from "./pages/Dashboard/UpgradePlan.tsx";
-import ControlPanelPage from "./pages/Dashboard/ControlPanel.tsx";
-
+import PublicAuthRoute from "./components/PublicAuthRoute"; // Imported PublicAuthRoute
+import BackupsAndRestore from "./pages/Dashboard/BackupsAndRestore";
+import UpgradePlan from "./pages/Dashboard/UpgradePlan";
+import ControlPanelPage from "./pages/Dashboard/ControlPanel";
+import LandingPage from "./pages/LandingPage";
 
 export default function App() {
   return (
@@ -21,8 +21,12 @@ export default function App() {
       <ScrollToTop />
 
       <Routes>
+        {/* PUBLIC ROUTE */}
+        <Route path="/" element={<LandingPage />} />
 
+        {/* PROTECTED ROUTES */}
         <Route
+          path="/dashboard"
           element={
             <ProtectedRoute>
               <AppLayout />
@@ -37,11 +41,33 @@ export default function App() {
           <Route path="terminal" element={<UiTerminal />} />
         </Route>
 
-        <Route path="/signin" element={<SignIn />} />
-        <Route path="/signup" element={<SignUp />} />
-        <Route path="/reset-password" element={<ForgotPassword />} />
+        {/* AUTH ROUTES (Wrapped in PublicAuthRoute) */}
+        <Route 
+          path="/signin" 
+          element={
+            <PublicAuthRoute>
+              <SignIn />
+            </PublicAuthRoute>
+          } 
+        />
+        <Route 
+          path="/signup" 
+          element={
+            <PublicAuthRoute>
+              <SignUp />
+            </PublicAuthRoute>
+          } 
+        />
+        <Route 
+          path="/reset-password" 
+          element={
+            <PublicAuthRoute>
+              <ForgotPassword />
+            </PublicAuthRoute>
+          } 
+        />
 
-
+        {/* 404 CATCH ALL */}
         <Route path="*" element={<NotFound />} />
       </Routes>
     </Router>
