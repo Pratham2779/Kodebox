@@ -68,7 +68,7 @@ export default function UserAddressCard() {
 
               {/* Upgrade Button (Visible if not on Pro) */}
               {!isPro && (
-                <Link to="/upgrade-plan">
+                <Link to="/dashboard/upgrade-plan">
                   <Button size="sm" className="hidden sm:inline-flex">
                     Upgrade Plan
                   </Button>

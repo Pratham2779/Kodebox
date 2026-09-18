@@ -142,7 +142,7 @@ async function syncInstanceResourcesWithPlan(userId, planId) {
     if (instance.status !== "deleted") {
       try {
         await updateInstanceResources(instance.name, plan.cpu_limit, plan.memory_limit_mb);
-        console.log(`[SYNC] Updated Docker resources for instance: ${instance.name} to Plan ID: ${plan.id}`);
+        
       } catch (err) {
         console.error(`[SYNC ERROR] Failed to update Docker resources for ${instance.name}:`, err.message);
       }

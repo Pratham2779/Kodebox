@@ -21,7 +21,7 @@ const sendMail = async ({to, subject = "", text = "", html = ""}) => {
     html,
   });
 
-  console.log("Message sent:", info.messageId);
+ 
 };
 
 export { sendMail };

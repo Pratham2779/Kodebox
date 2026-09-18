@@ -6,7 +6,7 @@ import { User } from "../src/models/user.model.js";
 import { createBackup } from "../src/utils/backup.util.js";
 
 export const processMonthlyBackups = async () => {
-  console.log("[CRON] Checking for due backups...");
+ 
   
   const thirtyDaysAgo = new Date();
   thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
@@ -23,18 +23,18 @@ export const processMonthlyBackups = async () => {
       }
     });
 
-    console.log(`[CRON] Found ${instancesToBackup.length} instances to backup.`);
+   
 
     for (const instance of instancesToBackup) {
       try {
         const user = await User.findByPk(instance.user_id);
         
         if (!user) {
-          console.warn(`[CRON] User not found for instance ${instance.name}. Skipping.`);
+        
           continue;
         }
 
-        console.log(`[CRON] Backing up instance: ${instance.name}`);
+       
         
         await createBackup({
           username: user.username,
@@ -51,5 +51,5 @@ export const processMonthlyBackups = async () => {
 
 export const startBackupCron = () => {
   cron.schedule("0 2 * * *", processMonthlyBackups);
-  console.log("[CRON] Backup scheduler initialized.");
+
 };

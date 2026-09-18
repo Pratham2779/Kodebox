@@ -6,6 +6,7 @@ import cookieParser from 'cookie-parser';
 import { fileURLToPath } from 'url';
 import path from 'path';
 
+// Route imports
 import { userRouter } from './routes/user.route.js';
 import { authRouter } from './routes/auth.route.js';
 import { planRouter } from './routes/plan.route.js';
@@ -18,6 +19,8 @@ import { errorHandler } from './middlewares/errorHandler.middleware.js';
 const app = express();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// --- Middlewares ---
 
 app.use(
   '/api/v1/webhooks/razorpay',
@@ -40,12 +43,13 @@ app.use((req, res, next) => {
 });
 
 app.use(express.urlencoded({ limit: '10mb', extended: true }));
+
+// Serve backend public/upload files
 app.use(express.static('public'));
 app.use('/uploads', express.static(path.join(__dirname, '../public/uploads')));
 
-app.get('/', (req, res) => {
-  res.send("Hello from Kodebox API!");
-});
+
+// --- API Routes ---
 
 app.use('/api/v1/user', userRouter);
 app.use('/api/v1/auth', authRouter);
@@ -55,13 +59,29 @@ app.use('/api/v1/subscription', subscriptionRouter);
 app.use('/api/v1/webhooks', razorpayWebhookRouter);
 app.use('/api/v1/backups', backupRouter);
 
-app.use((req, res) => {
+// Specific 404 handler for API routes
+app.use('/api', (req, res) => {
   res.status(404).json({
     success: false,
-    message: 'Route not found',
+    message: 'API Route not found',
   });
 });
 
+
+// --- Frontend Serving ---
+
+
+const frontendDistPath = path.join(__dirname, '../../frontend/dist');
+
+app.use(express.static(frontendDistPath));
+
+
+app.get(/.*/, (req, res) => {
+  res.sendFile(path.join(frontendDistPath, 'index.html'));
+});
+
+
+// --- Global Error Handler ---
 app.use(errorHandler);
 
 export { app };

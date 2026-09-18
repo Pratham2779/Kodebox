@@ -30,7 +30,7 @@ const handleRazorpayWebhook = async (req, res) => {
     const event = parsedBody.event;
     const payload = parsedBody.payload;
 
-    console.log(`[WEBHOOK] Received verified event: ${event}`);
+   
 
     if (event === "subscription.charged") {
       const subEntity = payload.subscription.entity;
@@ -84,7 +84,7 @@ const handleRazorpayWebhook = async (req, res) => {
       await User.update({ plan_id: planId }, { where: { id: userId } });
       await syncInstanceResourcesWithPlan(userId, planId);
       
-      console.log(`[WEBHOOK SUCCESS] Upgraded User ${userId} to Plan ${planId}`);
+     
 
     } 
     else if (event === "subscription.halted" || event === "subscription.cancelled") {
@@ -104,7 +104,7 @@ const handleRazorpayWebhook = async (req, res) => {
         await User.update({ plan_id: freePlanId }, { where: { id: subscription.user_id } });
         await syncInstanceResourcesWithPlan(subscription.user_id, freePlanId);
         
-        console.log(`[WEBHOOK DOWNGRADE] Downgraded User ${subscription.user_id} to Free Plan`);
+        
       }
     }
 

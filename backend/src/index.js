@@ -23,7 +23,6 @@ const PORT = process.env.PORT || 3000;
     // In production, use Migrations instead of sync({ alter: true })
     if (process.env.NODE_ENV === "development") {
       await sequelize.sync();
-      console.log("Database models synced");
     }
 
     startBackupCron();

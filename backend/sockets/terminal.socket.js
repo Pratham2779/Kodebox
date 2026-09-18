@@ -20,6 +20,7 @@ const FORCE_SHELL_POKE = process.env.FORCE_SHELL_POKE === "true";
 
 const IMAGE_NAME = process.env.INSTANCE_IMAGE || "lscr.io/linuxserver/code-server:latest";
 const NETWORK_NAME = process.env.DOCKER_NETWORK || "kodebox-net";
+const DOMAIN=process.env.DOMAIN;
 
 if (!JWT_SECRET) throw new Error("JWT_ACCESS_TOKEN_SECRET is required");
 
@@ -79,7 +80,7 @@ export function initTerminalSocket(httpServer) {
       }
 
       const instanceName = `${user.username}-kodebox`;
-      const subdomain = `${user.username}-kodebox.prathamesh.site`;
+      const subdomain = `${user.username}-kodebox.${DOMAIN}`;
       const password = `${user.username}@${user.id}`;
       const volumeName = `${user.username}-workspace`;
 
@@ -213,7 +214,7 @@ export function initTerminalSocket(httpServer) {
       });
 
       socket.on("disconnect", (reason) => {
-        console.log("Socket disconnected:", reason);
+       
         cleanup("socket-disconnect");
       });
 

@@ -7,7 +7,6 @@ import { Backup } from "./backup.model.js";
 import { Payment } from "./payment.model.js";
 import { EmailVerification } from "./email-verification.model.js";
 
-console.log("Initializing Database Associations...");
 
 
 Plan.hasMany(Subscription, { foreignKey: "plan_id" });

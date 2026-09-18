@@ -22,13 +22,14 @@ import {
 const IMAGE_NAME =
   process.env.INSTANCE_IMAGE || "lscr.io/linuxserver/code-server:latest";
 const NETWORK_NAME = process.env.DOCKER_NETWORK || "kodebox-net";
+const DOMAIN=process.env.DOMAIN;
 
 function buildInstanceName(username) {
   return `${username}-kodebox`;
 }
 
 function buildSubdomain(username) {
-  return `${username}-kodebox.prathamesh.site`;
+  return `${username}-kodebox.${DOMAIN}`;
 }
 
 function buildPassword(username, userId) {

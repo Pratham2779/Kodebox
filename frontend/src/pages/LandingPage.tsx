@@ -11,10 +11,11 @@ import {
   Sparkles,
   Zap
 } from 'lucide-react';
+const DOMAIN = import.meta.env.VITE_DOMAIN;
 
 const LandingPage: React.FC = () => {
   const { isAuthenticated, loading } = useAuth(); // Destructure auth state
-
+  
   return (
     <div className="min-h-screen bg-[#050505] text-zinc-100 font-sans selection:bg-emerald-500/30 relative overflow-hidden">
       
@@ -102,7 +103,7 @@ const LandingPage: React.FC = () => {
               <div className="w-3 h-3 rounded-full bg-emerald-500/80" />
             </div>
             <div className="mx-auto flex items-center gap-2 text-xs font-mono text-zinc-500 bg-black/50 px-3 py-1 rounded-md border border-white/5">
-              <Lock className="w-3 h-3" /> yourname-kodebox.prathamesh.site
+              <Lock className="w-3 h-3" /> yourname-kodebox.{DOMAIN}
             </div>
           </div>
           <div className="flex h-[400px] sm:h-[500px]">

@@ -9,7 +9,7 @@ import { ScrollToTop } from "./components/common/ScrollToTop";
 import ForgotPassword from "./pages/AuthPages/ForgotPassword";
 import UiTerminal from "./pages/Dashboard/UiTerminal";
 import ProtectedRoute from "./components/ProtectedRoute";
-import PublicAuthRoute from "./components/PublicAuthRoute"; // Imported PublicAuthRoute
+import PublicAuthRoute from "./components/PublicAuthRoute";
 import BackupsAndRestore from "./pages/Dashboard/BackupsAndRestore";
 import UpgradePlan from "./pages/Dashboard/UpgradePlan";
 import ControlPanelPage from "./pages/Dashboard/ControlPanel";

@@ -56,7 +56,6 @@ export default function UserMetaCard() {
 
       await profileService.updateProfile(formData);
 
-      console.log("Profile photo updated successfully. Refreshing...");
       window.location.reload();
     } catch (err: any) {
       console.error("Failed to update avatar", err);

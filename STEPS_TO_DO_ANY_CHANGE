@@ -1,0 +1,11 @@
+If any change is made in frontend or backend folloe the following steps
+
+1. run -> 'npm run build'  command in backend folder
+2. run -> 'docker build -t prathamesh527/kodebox-app:latest . ' command in the root folder 
+3. run -> 'docker push prathamesh527/kodebox-app:latest ' command in the root folder
+4. run -> 'docker compose pull' command in the home server /kodebox folder which is present in the home folder
+5. run -> 'docker compose up -d --force-recreate' command in the /kodebox folder which is present in the home folder
+
+
+NOTE : this is the copy of original app and this folder of kodebox is used to make image of app and the original is used for the github repo purpose
+

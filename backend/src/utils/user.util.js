@@ -10,7 +10,6 @@ import path from 'path';
 
 const getProfilePhotoUrl = async (avatarKey) => {
   const key = avatarKey || process.env.DEFAULT_AVATAR_KEY;
-  console.log(key);
   const command = new GetObjectCommand({
     Bucket: process.env.AWS_S3_BUCKET,
     Key: key

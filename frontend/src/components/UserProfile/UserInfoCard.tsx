@@ -62,7 +62,6 @@ export default function UserInfoCard() {
 
       await profileService.updateProfile(formData);
 
-      console.log("Phone number updated successfully. Refreshing...");
       window.location.reload();
     } catch (err: any) {
       console.error("Failed to update phone", err);
@@ -77,7 +76,6 @@ export default function UserInfoCard() {
     setIsLoading(true);
 
     try {
-      console.log("Sending OTP...");
       await authService.requestPasswordReset(user!.email);
       setCurrentStep("otp");
     } catch (err: any) {
@@ -97,7 +95,6 @@ export default function UserInfoCard() {
 
     setIsLoading(true);
     try {
-      console.log("Verifying OTP...");
       await authService.verifyPasswordResetOtp(user!.email, otp);
       setCurrentStep("new-password");
     } catch (err: any) {
@@ -123,7 +120,6 @@ export default function UserInfoCard() {
 
       await authService.resetPassword(user!.email, newPassword);
 
-      console.log("Password updated successfully. Refreshing...");
       window.location.reload();
     } catch (err: any) {
       console.error("Failed to update password", err);

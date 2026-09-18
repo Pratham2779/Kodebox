@@ -6,9 +6,8 @@ import { FitAddon } from "xterm-addon-fit";
 import { io, Socket } from "socket.io-client";
 import "xterm/css/xterm.css";
 import { tokenStorage } from "../../lib/tokenStorage";
+const DOMAIN = import.meta.env.VITE_DOMAIN;
 
-
-const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || "http://localhost:3000";
 
 export default function TerminalPage() {
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -18,10 +17,8 @@ export default function TerminalPage() {
 
   const [status, setStatus] = useState<"disconnected" | "connecting" | "connected" | "ready">("disconnected");
 
-
   useEffect(() => {
     if (!containerRef.current) return;
-
 
     const term = new Terminal({
       cursorBlink: true,
@@ -49,9 +46,7 @@ export default function TerminalPage() {
     term.loadAddon(fit);
     term.open(containerRef.current);
 
-
     setTimeout(() => fit.fit(), 150);
-
 
     term.attachCustomKeyEventHandler((e) => {
       if (e.ctrlKey && e.shiftKey && e.code === "KeyC") {
@@ -75,7 +70,6 @@ export default function TerminalPage() {
     };
   }, []);
 
-
   useEffect(() => {
     if (!termRef.current || socketRef.current) return;
 
@@ -88,9 +82,10 @@ export default function TerminalPage() {
       return;
     }
 
-
-    const socket = io(`${BACKEND_URL}/terminal`, {
-      transports: ["websocket", "polling"],
+    // THE FIX: Automatically connects to the current domain + /terminal namespace
+    const socket = io("/terminal", {
+      path: "/socket.io", // Explicitly define the path so Nginx and Traefik route it correctly
+      transports: ["websocket"], // Force websockets to avoid long-polling CORS errors
       auth: { token },
       withCredentials: true,
       reconnection: true,
@@ -108,7 +103,6 @@ export default function TerminalPage() {
         socket.emit("terminal:resize", { cols: term.cols, rows: term.rows });
       }
     };
-
 
     socket.on("connect", () => {
       setStatus("connected");
@@ -156,7 +150,6 @@ export default function TerminalPage() {
       socketRef.current = null;
     };
   }, []);
-
 
   return (
     <div className="mx-auto w-full max-w-[1600px]">
@@ -210,7 +203,7 @@ export default function TerminalPage() {
               </div>
             </div>
             <div className="hidden text-[10px] font-mono tracking-widest text-slate-500 md:block">
-              {BACKEND_URL.replace(/^https?:\/\//, '')}
+              kodebox.{DOMAIN}
             </div>
           </div>
 

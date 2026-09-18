@@ -1,7 +1,7 @@
 {
   "name": "kodebox",
   "version": "1.0.0",
-  "description": "kodebox is a cloudide",
+  "description": "Kodebox is a containerized cloud IDE",
   "homepage": "https://github.com/Pratham2779/Kodebox#readme",
   "bugs": {
     "url": "https://github.com/Pratham2779/Kodebox/issues"
@@ -13,10 +13,16 @@
   "license": "ISC",
   "author": "Prathamesh Arun Gurav",
   "type": "module",
-  "main": "index.js",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=18.0.0"
+  },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "start": "nodemon src/index.js"
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js",
+    "build:frontend": "npm install --prefix ../frontend && npm run build --prefix ../frontend",
+    "build": "npm run build:frontend",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
   "devDependencies": {
     "nodemon": "^3.1.11"

@@ -5,15 +5,15 @@ config();
 
 async function seedPlans() {
   try {
-    console.log("Seeding plans...");
+    
 
     //Connect to DB
     await sequelize.authenticate();
-    console.log("Database connected");
+    
 
 
     await sequelize.sync({ alter: false });
-    console.log("Tables synced (created if not present)");
+   
 
     const plans = [
       {
@@ -30,7 +30,7 @@ async function seedPlans() {
       {
         name: "Starter",
         price: 249,
-        razorpay_plan_id: "plan_RzlBYZId9bOsMO",
+        razorpay_plan_id: "plan_SRVHooDIjvrbET",
         cpu_limit: 2,
         memory_limit_mb: 2048,
         disk_limit_mb: 15360,
@@ -41,7 +41,7 @@ async function seedPlans() {
       {
         name: "Pro",
         price: 499,
-        razorpay_plan_id: "plan_RzlF2pNzUltpnP",
+        razorpay_plan_id: "plan_SRVGnaJBbMXIrI",
         cpu_limit: 4,
         memory_limit_mb: 4096,
         disk_limit_mb: 25600,
@@ -58,14 +58,8 @@ async function seedPlans() {
         defaults: plan,
       });
 
-      if (created) {
-        console.log(`Created plan: ${plan.name}`);
-      } else {
-        console.log(`Plan already exists: ${plan.name}`);
-      }
     }
 
-    console.log("Plan seeding completed successfully");
     process.exit(0);
   } catch (error) {
     console.error("Plan seeding failed:", error);

@@ -118,7 +118,7 @@ const refresh = asyncHandler(async (req, res) => {
     decoded = jwt.verify(refreshToken, process.env.JWT_REFRESH_TOKEN_SECRET);
   } catch (error) {
 
-    console.log("JWT VERIFY ERROR:", error.name, error.message);
+    console.error("JWT VERIFY ERROR:", error.name, error.message);
     throw new ApiError(401, "Session expired. Please login again.");
   }
 

@@ -67,7 +67,7 @@ export default function SidebarWidget() {
         </button>
       ) : (
         <Link
-          to="/upgrade-plan"
+          to="/dashboard/upgrade-plan"
           className="flex items-center justify-center p-3 font-medium text-white rounded-lg bg-brand-500 text-sm transition-all hover:bg-brand-600 shadow-sm hover:shadow-md active:scale-95"
         >
           Upgrade Plan
